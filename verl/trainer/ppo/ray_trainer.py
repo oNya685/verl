@@ -51,7 +51,7 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.mismatch_helper import compute_rollout_importance_weights
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
-from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_estimator, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -252,6 +252,8 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        elif "estimated_rewards" in data.batch:  # optional
+            adv_kwargs["reward_baselines"] = data.batch["estimated_rewards"]
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
@@ -324,6 +326,7 @@ class RayPPOTrainer:
         self.use_reference_policy = need_reference_policy(self.role_worker_mapping)
         self.use_rm = need_reward_model(self.role_worker_mapping)
         self.use_critic = need_critic(self.config)
+        self.use_reward_estimator = need_reward_estimator(self.role_worker_mapping)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -715,6 +718,14 @@ class RayPPOTrainer:
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model)
             self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
 
+        # create reward estimator if needed
+        if self.use_reward_estimator:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardEstimator)
+            estimator_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.RewardEstimator], config=self.config.reward_estimator
+            )
+            self.resource_pool_to_cls[resource_pool][str(Role.RewardEstimator)] = estimator_cls
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -760,6 +771,10 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg[str(Role.RewardModel)]
             self.rm_wg.init_model()
+
+        if self.use_reward_estimator:
+            self.estimator_wg = all_wg[str(Role.RewardEstimator)]
+            self.estimator_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(Role.ActorRollout)]
@@ -1196,6 +1211,11 @@ class RayPPOTrainer:
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+                    if self.use_reward_estimator:
+                        with marked_timer("estimated_reward", timing_raw, color="pupple"):
+                            estimated_reward = self.estimator_wg.compute_estimated_reward(batch)
+                            batch = batch.union(estimated_reward)
+
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
@@ -1230,9 +1250,8 @@ class RayPPOTrainer:
                         # estimated_reward = theta * DataProto['hidden_states']
 
                         batch = compute_advantage(
-                            batch,
+                            batch,  # estimated_rewards into adv_est_fn
                             adv_estimator=self.config.algorithm.adv_estimator,
-                            # TODO: estimated_reward #(batch_size,)
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
@@ -1247,7 +1266,12 @@ class RayPPOTrainer:
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
-                    # TODO: update theta
+                    # update reward estimator
+                    if self.use_reward_estimator:
+                        with marked_timer("update_estimator", timing_raw, color="purple"):
+                            estimator_output = self.estimator_wg.update_estimator(batch)
+                        estimator_output_metrics = reduce_metrics(estimator_output.meta_info["metrics"])
+                        metrics.update(estimator_output_metrics)
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
