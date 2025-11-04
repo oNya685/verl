@@ -660,6 +660,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
     @DistProfiler.annotate(color="red")
     def generate_sequences(self, prompts: DataProto):
+        breakpoint()
         assert self._is_rollout
         prompts = prompts.to(get_device_name())
         meta_info = {
@@ -681,6 +682,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
         with simple_timer("generate_sequences", timing_generate):
+            #Here
             output = self.rollout.generate_sequences(prompts=prompts)
 
         if self._is_actor:

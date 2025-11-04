@@ -1096,7 +1096,9 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
+                        # breakpoint()
                         if not self.async_rollout_mode:
+                            #Here
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
@@ -1225,9 +1227,12 @@ class RayPPOTrainer:
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
 
+                        # estimated_reward = theta * DataProto['hidden_states']
+
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
+                            # TODO: estimated_reward #(batch_size,)
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
@@ -1241,6 +1246,8 @@ class RayPPOTrainer:
                             critic_output = self.critic_wg.update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
+
+                    # TODO: update theta
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:

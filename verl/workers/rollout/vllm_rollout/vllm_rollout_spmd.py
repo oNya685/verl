@@ -222,7 +222,7 @@ class vLLMRollout(BaseRollout):
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
             dtype=config.dtype,
-            enforce_eager=config.enforce_eager,
+            enforce_eager=True,
             gpu_memory_utilization=config.gpu_memory_utilization,
             disable_custom_all_reduce=True,
             skip_tokenizer_init=False,
@@ -231,8 +231,8 @@ class vLLMRollout(BaseRollout):
             load_format=load_format,
             disable_log_stats=config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=config.enable_chunked_prefill,
-            enable_prefix_caching=config.enable_prefix_caching,
+            enable_chunked_prefill=True, #config.enable_chunked_prefill,
+            enable_prefix_caching=False, #config.enable_prefix_caching,
             trust_remote_code=trust_remote_code,
             seed=config.get("seed", 0),
             **compilation_config,
@@ -366,10 +366,223 @@ class vLLMRollout(BaseRollout):
                     LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path")
                 ] * batch_size
 
+        # # users can customize different sampling_params at different run
+        # with self.update_sampling_params(**kwargs):
+        #     # 存储 hidden states 的容器
+        #     hidden_states_cache = {}
+
+        #     def extract_hidden_states(model):
+        #         """在模型的最后一层添加 hook 来提取 hidden states"""
+                
+        #         def hook_fn(module, input, output):
+        #             # output 是最后一层 transformer 的输出
+        #             if isinstance(output, tuple):
+        #                 hidden_states = output[0]
+        #             else:
+        #                 hidden_states = output
+                    
+        #             # 检查维度并相应处理
+        #             if hidden_states.dim() == 3:
+        #                 # 传统格式: (batch_size, seq_len, hidden_size)
+        #                 # 只保存最后一个 token 的 hidden state
+        #                 hidden_states_cache['last_hidden_state'] = hidden_states[:, -1, :].detach().cpu()
+        #             elif hidden_states.dim() == 2:
+        #                 # 打包格式 (remove_padding): (total_tokens, hidden_size)
+        #                 # 在这种情况下，我们需要知道每个序列的长度来提取正确的 token
+        #                 # 简单方案：保存所有 tokens，之后再处理
+        #                 hidden_states_cache['all_hidden_states'] = hidden_states.detach().cpu()
+        #                 # 或者，如果只关心第一个序列的最后一个 token（在 prefill 阶段）
+        #                 # 可以使用模型的 input_metadata 来确定位置
+        #             else:
+        #                 print(f"Unexpected hidden_states shape: {hidden_states.shape}")
+                
+        #         # 找到模型的最后一层 transformer 层
+        #         if hasattr(model, 'model'):
+        #             if hasattr(model.model, 'layers'):
+        #                 # LLaMA, Mistral, Qwen 等
+        #                 last_layer = model.model.layers[-1]
+        #             elif hasattr(model.model, 'decoder'):
+        #                 # GPT 系列
+        #                 last_layer = model.model.decoder.layers[-1]
+        #             else:
+        #                 raise ValueError("无法找到 transformer 层")
+                
+        #             # 注册 hook
+        #             handle = last_layer.register_forward_hook(hook_fn)
+        #             return handle
+                
+        #         return None
+
+        #     # 在模型上应用 hook
+        #     handles = self.inference_engine.apply_model(extract_hidden_states)
+
+        #     # 进行生成（会触发 hook）
+        #     breakpoint()
+        #     outputs = self.inference_engine.generate(
+        #         prompts=vllm_inputs,
+        #         sampling_params=SamplingParams(max_tokens=1),  # 只生成一个 token
+        #         use_tqdm=False,
+        #     )
+
+        #     # 获取缓存的 hidden state
+        #     if 'last_hidden_state' in hidden_states_cache:
+        #         prompt_feature = hidden_states_cache['last_hidden_state']
+        #         print(f"Hidden state shape: {prompt_feature.shape}")
+        #     elif 'all_hidden_states' in hidden_states_cache:
+        #         # 对于打包格式，需要更复杂的逻辑来提取每个 prompt 的特征
+        #         all_states = hidden_states_cache['all_hidden_states']
+        #         print(f"All hidden states shape: {all_states.shape}")
+        #         # 这里需要根据实际的 batch 信息来分割
+        #         # 可能需要从 scheduler_output 或其他地方获取每个序列的长度
+
+        #     # 清理 hooks
+        #     for handle in handles:
+        #         if handle is not None:
+        #             handle.remove()
+        #     # 继续正常的生成流程
+
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
+            # 存储 hidden states 的容器和序列长度信息
+            hidden_states_cache = {}
+            # 获取每个序列的 prompt 长度（用于后续分割）
+            tokenizer = self.inference_engine.get_tokenizer()
+            print(len(vllm_inputs[0]["prompt_token_ids"]))
+            print(tokenizer.decode(vllm_inputs[0]["prompt_token_ids"], skip_special_tokens=True))
+            prompt_lengths = [len(input_data["prompt_token_ids"]) for input_data in vllm_inputs]
+
+            def extract_hidden_states(model):
+                """在模型的最后一层添加 hook 来提取 hidden states"""
+                
+                def hook_fn(module, input, output):
+                    # output 是最后一层 transformer 的输出
+                    if isinstance(output, tuple):
+                        hidden_states = output[0]
+                    else:
+                        hidden_states = output
+                    
+                    # 检查维度并相应处理
+                    if hidden_states.dim() == 3:
+                        # 传统格式: (batch_size, seq_len, hidden_size)
+                        raise NotImplementedError
+                        hidden_states_cache['last_hidden_state'] = hidden_states[:, -1, :].detach().cpu()
+                    elif hidden_states.dim() == 2:
+                        # 打包格式 (remove_padding): (total_tokens, hidden_size)
+                        print(hidden_states.shape)
+                        hs = hidden_states.detach().cpu()          # [seq_len, 896]
+                        if 'all_hidden_states' in hidden_states_cache:
+                            # 在 seq_len 维拼，得到更长的序列
+                            hidden_states_cache['all_hidden_states'] = torch.cat(
+                                (hidden_states_cache['all_hidden_states'], hs), dim=0
+                            )
+                        else:
+                            hidden_states_cache['all_hidden_states'] = hs
+                        # breakpoint()
+                    else:
+                        print(f"Unexpected hidden_states shape: {hidden_states.shape}")
+                    # tokenizer.decode(input, skip_special_tokens=True)
+                
+                # 找到模型的最后一层 transformer 层
+                if hasattr(model, 'model'):
+                    if hasattr(model.model, 'layers'):
+                        # LLaMA, Mistral, Qwen 等
+                        last_layer = model.model.layers[-1]
+                    elif hasattr(model.model, 'decoder'):
+                        # GPT 系列
+                        last_layer = model.model.decoder.layers[-1]
+                    else:
+                        raise ValueError("无法找到 transformer 层")
+                
+                    # 注册 hook
+                    handle = last_layer.register_forward_hook(hook_fn)
+                    return handle
+                
+                return None
+
+            # 在模型上应用 hook
+            handles = self.inference_engine.apply_model(extract_hidden_states)
+            # breakpoint()
+
+            # 进行生成（会触发 hook）
             outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                prompts=vllm_inputs,
+                sampling_params=SamplingParams(max_tokens=1),  # 只生成一个 token
+                use_tqdm=False,
+            )
+
+            # 提取每个 prompt 的 hidden state
+            prompt_features = None
+            if 'last_hidden_state' in hidden_states_cache:
+                raise NotImplementedError
+                prompt_features = hidden_states_cache['last_hidden_state']
+                print(f"Hidden state shape: {prompt_features.shape}")
+            elif 'all_hidden_states' in hidden_states_cache:
+                # 打包格式：需要分割
+                all_states = hidden_states_cache['all_hidden_states']
+                lengths = prompt_lengths
+                
+                print(f"All hidden states shape: {all_states.shape}")   # (sum(tokens), hidden_size)
+                #(batch_size, hidden_size)
+                print(f"Prompt lengths: {lengths}")
+                
+                # 计算每个序列的结束位置（累积和）
+                cumsum_lengths = np.cumsum([0] + lengths)
+                
+                # 提取每个序列的最后一个 token 的 hidden state
+                prompt_features_list = []
+                for i in range(len(lengths)):
+                    start_idx = cumsum_lengths[i]
+                    end_idx = cumsum_lengths[i + 1]
+                    print(f'{all_states[start_idx].sum()} -> {all_states[end_idx - 1].sum()}')
+                    # 最后一个 token 的索引是 end_idx - 1
+                    last_token_hidden = all_states[end_idx - 1]
+                    prompt_features_list.append(last_token_hidden)
+                
+                # 堆叠成 (batch_size, hidden_size) 的 tensor
+                prompt_features = torch.stack(prompt_features_list, dim=0)
+                print(f"Extracted prompt features shape: {prompt_features.shape}")
+                
+                # 如果需要，可以保存到文件或返回
+                # torch.save(prompt_features, 'prompt_features.pt')
+
+                import matplotlib
+                matplotlib.use('Agg')          # 服务器无显示
+                import matplotlib.pyplot as plt
+
+                # ---------- 假设已有 ----------
+                # big_tensor : torch.Tensor 形状 (total_tokens, hidden_size)
+                # lengths    : list[int]
+                # --------------------------------
+                big_tensor = all_states
+
+                plt.figure(figsize=(24, 16))
+                for i in range(len(lengths)):
+                    start = cumsum_lengths[i]
+                    end   = cumsum_lengths[i + 1]
+                    token_sums = [big_tensor[i].sum().float().cpu().numpy() for i in range(start, end) ]
+                    # token_sums = big_tensor[start:end].sum(axis=1).float().cpu().numpy()
+                    x = np.arange(1, len(token_sums) + 1)
+                    plt.plot(x, token_sums, marker='o', markersize=2, label=f'prompt-{i}')
+
+                plt.xlabel('token index within prompt')
+                plt.ylabel('sum(hidden_state)')
+                plt.title('Trend of ∑ hidden_state along token sequence')
+                plt.legend()
+                plt.grid(alpha=0.3)
+                plt.tight_layout()
+
+                save_path = '/root/autodl-tmp/verl/prompt_hidden_trend.png'
+                plt.savefig(save_path, dpi=300)
+                print(f'图片已保存至 {save_path}')
+            
+
+            # 清理 hooks
+            for handle in handles:
+                if handle is not None:
+                    handle.remove()
+
+            outputs = self.inference_engine.generate(
+                prompts=vllm_inputs,
                 sampling_params=self.sampling_params,
                 lora_request=lora_requests,
                 use_tqdm=False,
@@ -423,6 +636,7 @@ class vLLMRollout(BaseRollout):
             {
                 "prompts": idx,
                 "responses": response,
+                #TODO: "hidden_states": ,
                 "input_ids": seq,  # here input_ids become the whole sentences
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
