@@ -35,6 +35,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    RewardEstimator = 7
 
     def __str__(self):
         return self._get_role_string()
@@ -48,6 +49,7 @@ class Role(Enum):
             Role.RefPolicy: "ref",
             Role.RewardModel: "rm",
             Role.ActorRolloutRef: "actor_rollout_ref",
+            Role.RewardEstimator: "reward_estimator",
         }
         return role_mapping.get(self, self.name.lower())
 
@@ -61,6 +63,7 @@ class Role(Enum):
             "ref": cls.RefPolicy,
             "rm": cls.RewardModel,
             "actor_rollout_ref": cls.ActorRolloutRef,
+            "reward_estimator": cls.RewardEstimator,
         }
         role = string_mapping.get(name.lower())
         if role is None:
@@ -94,3 +97,12 @@ def need_critic(config: DictConfig) -> bool:
             stacklevel=2,
         )
         return False
+
+
+def need_reward_estimator(
+    config: DictConfig,
+) -> bool:
+    """Given a role worker mapping, do we need reward estimator."""
+    if config.algorithm.adv_estimator == AdvantageEstimator.SPO:
+        return True
+    return False

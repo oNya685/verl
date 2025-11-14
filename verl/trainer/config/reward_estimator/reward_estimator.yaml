@@ -1,0 +1,87 @@
+# configs for the reward estimator
+
+# Whether to enable reward estimator. If False, we compute the reward only with the user-defined reward functions.
+# In GSM8K and Math examples, we disable reward estimator.
+# For RLHF alignment example using full_hh_rlhf, we utilize reward estimator to assess the responses.
+# If False, the following parameters are not effective
+enable: False
+
+use_analytical: false     # 使用神经网络模式
+hidden_size: 896          # 输入维度（原配置）
+hidden_layer_size: 512    # 新增：隐藏层大小
+dropout_rate: 0.15        # 新增：Dropout率
+learning_rate: 1e-3       # 比通常稍大，加快追踪速度
+gradient_clip_norm: 1.0   # 根据噪声强度调整（0.5-2.0）
+weight_decay: 1e-4        # 防止记忆噪声模式
+lambda_reg: 0.001
+
+# Whether to deploy the model to a separate resource pool.
+# If true, n_gpus_per_node & nnodes will be used to determine the resource node.
+enable_resource_pool: False
+n_gpus_per_node: 0
+nnodes: 0
+
+# FSDP strategy: "fsdp" or "fsdp2"
+strategy: ???
+
+# [Deprecated] Global micro batch size
+# will be deprecated, use micro_batch_size_per_gpu
+micro_batch_size: null
+
+# Local per-GPU micro batch size
+micro_batch_size_per_gpu: null
+
+# Maximum sequence length to process for scoring
+max_length: null
+
+# Whether to dynamically adjust batch size at runtime
+use_dynamic_bsz: ${critic.use_dynamic_bsz}
+
+# Maximum number of tokens per GPU in one forward pass
+forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
+
+# Reward Manager. This defines the mechanism of computing rule-based reward and handling different reward sources.
+# Default is naive. If all verification functions are multiprocessing-safe,
+# the reward manager can be set to prime for parallel verification.
+reward_manager: naive
+
+# Whether to launch custom reward function asynchronously during log_prob
+# custom reward function executed async on CPU, during log_prob
+launch_reward_fn_async: False
+
+# Cloud/local sandbox fusion configuration for custom reward logic
+sandbox_fusion:
+
+  # Cloud /local function URL for sandbox execution
+  url: null
+
+  # Max concurrent requests allowed to sandbox
+  max_concurrent: 64
+
+  # Max memory limit for each sandbox process in MB
+  memory_limit_mb: 1024
+
+# profile the reward estimator in `compute_reward` 
+profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # profiler tool, default same as profiler.tool in global config
+  # choices: nsys, npu, torch
+  tool: ${oc.select:global_profiler.tool,null}
+
+  # whether enable profile on ref
+  enable: False
+  
+  # Whether to profile all ranks.
+  all_ranks: False
+
+  # The ranks that will be profiled. [] or [0,1,...]
+  ranks: []
+
+  # profile results saving path
+  save_path: ${oc.select:global_profiler.save_path,null}
+
+  # specific tool config
+  tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}

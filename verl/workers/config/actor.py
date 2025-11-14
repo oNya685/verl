@@ -95,6 +95,8 @@ class ActorConfig(BaseConfig):
     ppo_micro_batch_size: Optional[int] = None  # deprecate
     ppo_micro_batch_size_per_gpu: Optional[int] = None
     ppo_infer_micro_batch_size_per_gpu: Optional[int] = None
+    output_hidden_states: bool = False
+    output_hidden_states_mode: Optional[str] = None
     use_dynamic_bsz: bool = False
     ppo_max_token_len_per_gpu: int = 16384
     ppo_infer_max_token_len_per_gpu: int = 16384

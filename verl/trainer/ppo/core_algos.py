@@ -105,6 +105,7 @@ class AdvantageEstimator(str, Enum):
     GPG = "gpg"
     RLOO_VECTORIZED = "rloo_vectorized"
     GRPO_VECTORIZED = "grpo_vectorized"
+    SPO = "spo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -326,6 +327,41 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_adv_est(AdvantageEstimator.SPO)
+def compute_spo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    reward_baselines: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for SPO, operating only on Outcome reward
+    (with only one scalar reward for each response).
+
+    Args:
+        token_level_rewards: `(torch.Tensor)`
+            shape is (bs, response_length)
+        reward_baselines: `(torch.Tensor)`
+            shape is (bs,)
+        response_mask: `(torch.Tensor)`
+            shape is (bs, response_length)
+        epsilon: `(float)`
+            small value to avoid division by zero
+    """
+    scores = token_level_rewards.sum(dim=-1)    # (bs,)
+    advantages = scores - reward_baselines     # (bs,)
+
+    with torch.no_grad():
+        if norm_adv_by_std_in_grpo:
+            mean_advantages, std_advantages = torch.mean(advantages), torch.std(advantages)
+            advantages = (advantages - mean_advantages) / (std_advantages + epsilon)
+        advantages = advantages.unsqueeze(-1) * response_mask
+    return advantages, advantages
 
 
 @register_adv_est(AdvantageEstimator.GRPO_VECTORIZED)

@@ -193,6 +193,7 @@ class TaskRunner:
 
         self.mapping[Role.ActorRollout] = global_pool_id
         self.mapping[Role.Critic] = global_pool_id
+        self.mapping[Role.RewardEstimator] = global_pool_id
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
@@ -223,6 +224,22 @@ class TaskRunner:
                 self.mapping[Role.RewardModel] = "reward_pool"
             else:
                 self.mapping[Role.RewardModel] = "global_pool"
+
+    def add_reward_estimator_worker(self, config):
+        """Add reward estimator worker if enabled."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        if config.reward_estimator.enable:
+            use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+            if use_legacy_worker_impl in ["auto", "enable"]:
+                from verl.workers.fsdp_workers import RewardEstimatorWorker
+            elif use_legacy_worker_impl == "disable":
+                raise NotImplementedError
+            else:
+                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
+
+            self.role_worker_mapping[Role.RewardEstimator] = ray.remote(RewardEstimatorWorker)
+            self.mapping[Role.RewardEstimator] = "global_pool"
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
@@ -263,6 +280,8 @@ class TaskRunner:
         # finally, we combine all the rewards together
         # The reward type depends on the tag of the data
         self.add_reward_model_worker(config)
+
+        self.add_reward_estimator_worker(config)
 
         # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
