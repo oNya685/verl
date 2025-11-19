@@ -354,6 +354,7 @@ def compute_spo_outcome_advantage(
             small value to avoid division by zero
     """
     scores = token_level_rewards.sum(dim=-1)    # (bs,)
+    reward_baselines = torch.clamp(reward_baselines, min=1e-2, max=1-1e-2)
     advantages = scores - reward_baselines     # (bs,)
 
     with torch.no_grad():
