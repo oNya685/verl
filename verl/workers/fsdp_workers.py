@@ -22,6 +22,7 @@ import os
 import warnings
 from dataclasses import asdict
 from typing import Any, Optional
+from collections import defaultdict
 
 import numpy as np
 import psutil
@@ -2855,7 +2856,8 @@ class RunningMeanStd:
 
 class RewardEstimatorWorker(Worker, DistProfilerExtension):
     """
-    奖励估计器 Worker，增加了手动CPU Offload功能以节省显存。
+    奖励估计器 Worker (MLP版)
+    使用 MLP + BCELoss 来预测 Baseline (0-1概率)，增加了手动CPU Offload功能以节省显存。
     """
     def __init__(self, config: FSDPCriticConfig):
         # -- 基础初始化 --
@@ -2875,22 +2877,25 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         self.torch_dtype = PrecisionType.to_dtype(torch_dtype_str)
 
         # -- 模式选择 --
-        self.mode = self.config.get("mode", "sgd") 
+        self.mode = 'sgd' 
         
-        self.lambda_reg = self.config.get("lambda_reg", 1e-3)
-        self.learning_rate = self.config.get("learning_rate", 1e-3)
+        # -- 优化器参数 --
+        self.learning_rate = self.config.get("learning_rate", 1e-4)
+        self.lr_scheduler_type = self.config.get("lr_scheduler_type", "cosine")
+        self.total_training_steps = self.config.get("total_training_steps", 15 * 29) 
+        self.lr_warmup_steps_ratio = self.config.get("lr_warmup_steps_ratio", 0.01)
+        self.min_lr_ratio = self.config.get("min_lr_ratio", 0.1)
 
         # -- 归一化与平滑 --
-        self.normalize_features = self.config.get("normalize_features", False)
-        self.normalize_value = self.config.get("normalize_value", False)
-        self.use_target_ema = self.config.get("use_target_ema", False)
-        self.ema_alpha = self.config.get("ema_alpha", 0.7)
+        self.normalize_features = self.config.get("normalize_features", True)
 
-        # -- 新增：Offload 配置 --
+        # -- MLP 配置 --
+        self.mlp_hidden_dim = self.config.model.get("mlp_hidden_dim", 512)
+
+        # -- Offload 配置 --
         self.offload_to_cpu = self.config.get("offload_to_cpu", True)
-        print(f"CPU Offload is {'ENABLED' if self.offload_to_cpu else 'DISABLED'}.")
         
-        print(f"Worker 初始化完成。模式: '{self.mode}', 目标数据类型: {self.torch_dtype}")
+        self.log_adapter.info(f"Worker 初始化完成 (MLP模式)。CPU Offload: {self.offload_to_cpu}, LR: {self.learning_rate}")
         
     def _init_profiler(self, config: FSDPCriticConfig):
         omega_profiler_config = config.get("profiler", {})
@@ -2919,7 +2924,7 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         if self.ulysses_sequence_parallel_size > 1:
             dp_size = world_size // self.ulysses_sequence_parallel_size
             self.ulysses_device_mesh = torch.distributed.device_mesh.init_device_mesh(
-                device_name, mesh_shape=(dp_size, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
+                "cuda", mesh_shape=(dp_size, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
             )
             is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
             dp_rank = self.ulysses_device_mesh["dp"].get_local_rank()
@@ -2930,214 +2935,219 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             
         self._register_dispatch_collect_info("reward_estimator", dp_rank=dp_rank, is_collect=is_collect)
 
-    # --- 新增：手动 Offload 和 Load 的辅助函数 ---
     def _load_to_gpu(self):
         """将所有模型组件和状态加载到 GPU。"""
         if not self.offload_to_cpu:
             return
         
         device = get_device_id()
-        self.log_adapter.debug("Loading RewardEstimator to GPU...")
+        # self.log_adapter.debug("Loading RewardEstimator to GPU...")
         self.model.to(device)
         if self.normalize_features: self.feature_rms.to(device)
-        if self.normalize_value: self.value_rms.to(device)
         
-        if self.mode == 'analytical':
-            self.XTX = self.XTX.to(device)
-            self.XTy = self.XTy.to(device)
-        elif self.mode == 'rls':
-            self.P = self.P.to(device)
-        elif self.mode == 'sgd':
-            # 优化器状态需要特殊处理
+        # 优化器状态需要特殊处理
+        if hasattr(self, 'optimizer') and self.optimizer is not None:
             for state in self.optimizer.state.values():
                 for k, v in state.items():
                     if torch.is_tensor(v):
                         state[k] = v.to(device)
-        self.log_adapter.debug("RewardEstimator loaded to GPU.")
+        # self.log_adapter.debug("RewardEstimator loaded to GPU.")
 
     def _offload_to_cpu(self):
         """将所有模型组件和状态卸载到 CPU。"""
         if not self.offload_to_cpu:
             return
             
-        self.log_adapter.debug("Offloading RewardEstimator to CPU...")
+        # self.log_adapter.debug("Offloading RewardEstimator to CPU...")
         self.model.to('cpu')
         if self.normalize_features: self.feature_rms.to('cpu')
-        if self.normalize_value: self.value_rms.to('cpu')
         
-        if self.mode == 'analytical':
-            self.XTX = self.XTX.to('cpu')
-            self.XTy = self.XTy.to('cpu')
-        elif self.mode == 'rls':
-            self.P = self.P.to('cpu')
-        elif self.mode == 'sgd':
-            # 优化器状态也需要移到CPU
+        # 优化器状态也需要移到CPU
+        if hasattr(self, 'optimizer') and self.optimizer is not None:
             for state in self.optimizer.state.values():
                 for k, v in state.items():
                     if torch.is_tensor(v):
                         state[k] = v.cpu()
         
-        aggressive_empty_cache() # 清理显存碎片
-        self.log_adapter.debug("RewardEstimator offloaded to CPU.")
+        aggressive_empty_cache() 
+        # self.log_adapter.debug("RewardEstimator offloaded to CPU.")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        """初始化模型。如果启用offload，则在CPU上初始化以节省显存。"""
-        # 决定初始化的设备
+        """初始化 MLP 模型和 SGD 优化器。"""
         device = 'cpu' if self.offload_to_cpu else get_device_id()
-        print(f"在设备 {device} 上初始化模型...")
+        print(f"在设备 {device} 上初始化 MLP 模型...")
         
-        self.model = torch.nn.Linear(self.hidden_size, 1, bias=False).to(device, dtype=self.torch_dtype)
+        # 使用 Sequential 构建 2层 MLP
+        # 最后不加 Sigmoid，直接输出 Logits，配合 BCEWithLogitsLoss 使用
+        self.model = torch.nn.Sequential(
+            torch.nn.Linear(self.hidden_size, self.mlp_hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(self.mlp_hidden_dim, 1)
+        ).to(device, dtype=self.torch_dtype)
+        
         self.n_samples = 0
         
         if self.normalize_features:
             self.feature_rms = RunningMeanStd(shape=(self.hidden_size,), device=device)
-        if self.normalize_value:
-            self.value_rms = RunningMeanStd(shape=(), device=device)
-        if self.use_target_ema:
-            self.ema_target_value = None
 
-        if self.mode == 'analytical':
-            self.XTX = torch.zeros(self.hidden_size, self.hidden_size, device=device, dtype=self.torch_dtype)
-            self.XTy = torch.zeros(self.hidden_size, device=device, dtype=self.torch_dtype)
-            print("模式 'analytical' 已初始化。")
-        elif self.mode == 'rls':
-            self.P = torch.eye(self.hidden_size, device=device, dtype=self.torch_dtype) / self.lambda_reg
-            print(f"模式 'rls' 已初始化。")
-        elif self.mode == 'sgd':
-            # 优化器需要模型参数，此时模型可能在CPU上
-            self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
-            print(f"模式 'sgd' 已初始化。")
+        # --- 优化器与调度器 ---
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+        
+        # 初始化学习率调度器
+        from verl.utils.torch_functional import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup
+        
+        num_warmup_steps = int(self.total_training_steps * self.lr_warmup_steps_ratio)
+        print(f"SGD 调度器: 类型={self.lr_scheduler_type}, 总步数={self.total_training_steps}, 预热={num_warmup_steps}")
+
+        if self.lr_scheduler_type == "constant":
+            self.lr_scheduler = get_constant_schedule_with_warmup(
+                optimizer=self.optimizer, num_warmup_steps=num_warmup_steps
+            )
+        elif self.lr_scheduler_type == "cosine":
+            self.lr_scheduler = get_cosine_schedule_with_warmup(
+                optimizer=self.optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=self.total_training_steps,
+                min_lr_ratio=self.min_lr_ratio # 保持一定学习率，不衰减到0
+            )
         else:
-            raise ValueError(f"未知的模式: {self.mode}。")
+            # 默认为 constant
+            self.lr_scheduler = get_constant_schedule_with_warmup(
+                optimizer=self.optimizer, num_warmup_steps=num_warmup_steps
+            )
+
+        print(f"MLP + AdamW 已初始化。")
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward_estimator"))
     def compute_estimated_reward(self, data: DataProto) -> DataProto:
-        """计算估计的奖励基线，并在计算前后自动处理GPU加载/卸载。"""
+        """
+        推理阶段：计算 Baseline。
+        输入：Hidden States
+        输出：Sigmoid(Logits) -> (0, 1) 概率值
+        """
         try:
-            self._load_to_gpu() # 将模型加载到GPU
+            self._load_to_gpu()
             
             data = data.to(get_device_id())
             hidden_states = data.batch["hidden_states"].to(self.torch_dtype)
             
             self.model.eval()
             with torch.no_grad():
+                # 特征归一化
                 if self.normalize_features:
                     hidden_states = (hidden_states - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
 
-                estimated_rewards = self.model(hidden_states).squeeze(-1)
+                # MLP 前向传播得到 Logits
+                logits = self.model(hidden_states).squeeze(-1)
                 
-                if self.normalize_value:
-                    estimated_rewards = estimated_rewards * torch.sqrt(self.value_rms.var + 1e-8) + self.value_rms.mean
+                # 推理时手动加 Sigmoid，限制输出在 (0, 1)
+                # Predicted Probability of Correctness
+                estimated_rewards = torch.sigmoid(logits)
 
             output = DataProto.from_dict(tensors={"estimated_rewards": estimated_rewards.cpu()})
             return output
         finally:
-            self._offload_to_cpu() # 确保计算结束后将模型卸载回CPU
+            self._offload_to_cpu()
     
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward_estimator"))
     def update_estimator(self, data: DataProto) -> DataProto:
-        """更新估计器，并在计算前后自动处理GPU加载/卸载。"""
+        """
+        训练阶段：使用 BCE Loss 更新 MLP。
+        """
         try:
-            self._load_to_gpu() # 将模型和状态加载到GPU
+            self._load_to_gpu()
 
-            # --- 阶段 1: 数据准备 ---
+            # --- 数据准备 ---
             data = data.to(get_device_id())
-            # (后续代码与上一版相同，此处省略以保持简洁)
             hidden_states = data.batch["hidden_states"].to(self.torch_dtype)
             target_rewards = data.batch["token_level_rewards"]
             if target_rewards.dim() == 2: target_rewards = target_rewards.sum(dim=-1)
             
-            # --- 阶段 2 & 3: 平滑与归一化 ---
-            if self.use_target_ema:
-                current_mean_reward = target_rewards.mean()
-                if self.ema_target_value is None: self.ema_target_value = current_mean_reward.cpu()
-                self.ema_target_value = self.ema_alpha * self.ema_target_value.to(current_mean_reward.device) + (1 - self.ema_alpha) * current_mean_reward
-                final_target = target_rewards - current_mean_reward + self.ema_target_value.detach()
-            else:
-                final_target = target_rewards
-            if self.normalize_value: self.value_rms.update(final_target.unsqueeze(-1))
-            if self.normalize_features: self.feature_rms.update(hidden_states)
-            if self.normalize_features: norm_hidden_states = (hidden_states - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
-            else: norm_hidden_states = hidden_states
-            if self.normalize_value: norm_target = (final_target - self.value_rms.mean) / torch.sqrt(self.value_rms.var + 1e-8)
-            else: norm_target = final_target
-            
-            # --- 阶段 4: 更新逻辑 ---
-            metrics = {}
-            self.n_samples += norm_hidden_states.shape[0]
-            if self.mode == 'analytical':
-                self.XTX += norm_hidden_states.T @ norm_hidden_states
-                self.XTy += norm_hidden_states.T @ norm_target
-                try:
-                    XTX_reg = self.XTX + self.lambda_reg * torch.eye(self.XTX.shape[0], device=get_device_id(), dtype=self.torch_dtype)
-                    theta = torch.linalg.solve(XTX_reg, self.XTy)
-                    with torch.no_grad(): self.model.weight.copy_(theta.unsqueeze(0))
-                    metrics["reward_estimator/XTX_cond"] = torch.linalg.cond(XTX_reg).item()
-                except torch.linalg.LinAlgError as e:
-                    print(f"解析解模式下发生线性代数错误: {e}")
-            elif self.mode == 'rls':
-                with torch.no_grad():
-                    for i in range(norm_hidden_states.shape[0]):
-                        x = norm_hidden_states[i]
-                        y = norm_target[i]
-                        Px = self.P @ x
-                        k_denominator = 1.0 + x @ Px
-                        K = Px / k_denominator
-                        current_theta = self.model.weight.squeeze(0)
-                        prediction_error = y - (current_theta @ x)
-                        new_theta = current_theta + K * prediction_error
-                        self.model.weight.copy_(new_theta.unsqueeze(0))
-                        self.P -= torch.outer(K, Px)
-            elif self.mode == 'sgd':
-                self.model.train()
-                estimated_rewards = self.model(norm_hidden_states).squeeze(-1)
-                loss = torch.nn.functional.mse_loss(estimated_rewards, norm_target)
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-                metrics["reward_estimator/loss"] = loss.item()
+            final_target = target_rewards.float()
 
-            # --- 阶段 5: 计算指标 ---
+            # --- 特征归一化更新 ---
+            if self.normalize_features: 
+                self.feature_rms.update(hidden_states)
+                norm_hidden_states = (hidden_states - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
+            else: 
+                norm_hidden_states = hidden_states
+            
+            # --- 训练更新 (MLP + BCE) ---
+            self.model.train()
+            
+            # 获取 Logits
+            logits = self.model(norm_hidden_states).squeeze(-1)
+            
+            # 计算 BCE With Logits Loss
+            loss_fn = torch.nn.BCEWithLogitsLoss()
+            loss = loss_fn(logits, final_target)
+            
+            # 反向传播
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            
+            # 调度器步进
+            self.lr_scheduler.step()
+
+            # --- 指标记录 ---
+            metrics = {}
+            metrics["reward_estimator/loss"] = loss.item()
+            metrics["reward_estimator/lr"] = self.lr_scheduler.get_last_lr()[0]
+            
             with torch.no_grad():
-                estimated_rewards_norm = self.model(norm_hidden_states).squeeze(-1)
-                loss = torch.nn.functional.mse_loss(estimated_rewards_norm, norm_target)
-                if 'reward_estimator/loss' not in metrics:
-                    metrics['reward_estimator/loss'] = loss.item()
-            mean_estimated_denorm = estimated_rewards_norm.mean() * torch.sqrt(self.value_rms.var + 1e-8) + self.value_rms.mean if self.normalize_value else estimated_rewards_norm.mean()
-            metrics.update({
-                "reward_estimator/n_samples": self.n_samples,
-                "reward_estimator/mean_estimated": mean_estimated_denorm.item(),
-                "reward_estimator/mean_target": target_rewards.mean().item(),
-                "reward_estimator/ema_target": self.ema_target_value.item() if self.use_target_ema and self.ema_target_value is not None else -1,
-            })
+                pred_probs = torch.sigmoid(logits)
+                metrics["reward_estimator/mean_predicted_prob"] = pred_probs.mean().item()
+                metrics["reward_estimator/mean_target"] = target_rewards.float().mean().item()
+
+                indices = data.non_tensor_batch["uid"]
+                
+                bsz = final_target.shape[0]
+                
+                # 1. 计算每个组的平均 Reward
+                id2score = defaultdict(list)
+                for i in range(bsz):
+                    # 将 tensor 转为 item 作为 key，值保留 tensor 以便计算
+                    id2score[indices[i]].append(final_target[i])
+                
+                id2mean = {}
+                for idx in id2score:
+                    # 计算该组的平均值
+                    scores_tensor = torch.stack(id2score[idx])
+                    id2mean[idx] = torch.mean(scores_tensor)
+                
+                # 2. 将 Group Mean 映射回每个样本
+                group_means = torch.zeros_like(final_target)
+                for i in range(bsz):
+                    group_means[i] = id2mean[indices[i]]
+                
+                # 3. 计算预测值与 Group Mean 的 MSE Loss
+                mse_vs_group = torch.nn.functional.mse_loss(pred_probs, group_means)
+                
+                metrics["reward_estimator/mse_vs_group_mean"] = mse_vs_group.item()
+                metrics["reward_estimator/mean_group_reward"] = group_means.mean().item()
+
+            self.n_samples += norm_hidden_states.shape[0]
+            metrics["reward_estimator/n_samples"] = self.n_samples
             
             return DataProto(meta_info={"metrics": metrics}).to('cpu')
         
         finally:
-            self._offload_to_cpu() # 确保计算结束后将模型和状态卸载回CPU
+            self._offload_to_cpu()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, path):
-        # 保存时，所有东西都应该在CPU上（如果offload开启），所以可以直接保存
-        print(f"正在保存检查点到 {path} (确保组件在CPU上)...")
-        self._offload_to_cpu() # 确保所有组件都在CPU上以便统一保存
+        print(f"正在保存检查点到 {path}...")
+        self._offload_to_cpu()
         
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
-            'mode': self.mode,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'lr_scheduler_state_dict': self.lr_scheduler.state_dict(), # 保存调度器
             'torch_dtype': self.torch_dtype,
             'feature_rms_state_dict': self.feature_rms.state_dict() if self.normalize_features else None,
-            'value_rms_state_dict': self.value_rms.state_dict() if self.normalize_value else None,
-            'ema_target_value': self.ema_target_value if self.use_target_ema else None,
         }
-        
-        if self.mode == 'analytical':
-            checkpoint.update({'XTX': self.XTX, 'XTy': self.XTy, 'n_samples': self.n_samples})
-        elif self.mode == 'rls':
-            checkpoint.update({'P': self.P, 'n_samples': self.n_samples})
-        elif self.mode == 'sgd':
-            checkpoint['optimizer_state_dict'] = self.optimizer.state_dict()
         
         torch.save(checkpoint, path)
         print("检查点保存成功。")
@@ -3145,36 +3155,21 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, path):
         if not path or not os.path.exists(path):
-            self.log_adapter.warning(f"检查点路径 '{path}' 无效或不存在。跳过加载。")
+            self.log_adapter.warning(f"检查点路径 '{path}' 无效或不存在。")
             return
             
-        # 根据是否offload，决定加载到哪个设备
         device = 'cpu' if self.offload_to_cpu else get_device_id()
         print(f"正在从 {path} 加载检查点到设备 {device}...")
         checkpoint = torch.load(path, map_location=device)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'lr_scheduler_state_dict' in checkpoint:
+            self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         
         if self.normalize_features and checkpoint.get('feature_rms_state_dict'):
             self.feature_rms.load_state_dict(checkpoint['feature_rms_state_dict'])
-        if self.normalize_value and checkpoint.get('value_rms_state_dict'):
-            self.value_rms.load_state_dict(checkpoint['value_rms_state_dict'])
-        if self.use_target_ema and checkpoint.get('ema_target_value') is not None:
-            self.ema_target_value = checkpoint['ema_target_value']
-
-        mode_in_ckpt = checkpoint.get('mode', 'sgd') 
-        if mode_in_ckpt != self.mode:
-            self.log_adapter.warning(f"检查点模式 '{mode_in_ckpt}' 与当前配置模式 '{self.mode}' 不匹配。只加载模型权重。")
-            return
-
-        if self.mode == 'analytical' and 'XTX' in checkpoint:
-            self.XTX = checkpoint['XTX']; self.XTy = checkpoint['XTy']; self.n_samples = checkpoint['n_samples']
-        elif self.mode == 'rls' and 'P' in checkpoint:
-            self.P = checkpoint['P']; self.n_samples = checkpoint['n_samples']
-        elif self.mode == 'sgd' and 'optimizer_state_dict' in checkpoint:
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        # 确保加载后所有组件都在正确的设备上
         if self.offload_to_cpu:
             self._offload_to_cpu()
         else:
@@ -3184,20 +3179,9 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
     
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def reset_accumulation(self):
-        """重置累积统计信息，并确保在正确的设备上。"""
-        print("收到重置累积统计的请求。")
-        device = get_device_id() if not self.offload_to_cpu else 'cpu'
+        """MLP 模式下没有累积矩阵需要重置，仅重置计数器。"""
         self.n_samples = 0
-
-        if self.mode == 'analytical':
-            self.XTX = torch.zeros(self.hidden_size, self.hidden_size, device=device, dtype=self.torch_dtype)
-            self.XTy = torch.zeros(self.hidden_size, device=device, dtype=self.torch_dtype)
-            print("已重置 'analytical' 模式的累积统计信息。")
-        elif self.mode == 'rls':
-            self.P = torch.eye(self.hidden_size, device=device, dtype=self.torch_dtype) / self.lambda_reg
-            print("已重置 'rls' 模式的累积统计信息。")
-        else:
-            self.log_adapter.warning(f"重置操作对 '{self.mode}' 模式无效。")
+        print("已重置样本计数器。")
 
 # ================================= Async related workers =================================
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
