@@ -128,3 +128,4 @@ outputs
 .history
 
 tensorboard_log/
+!data/**/*
