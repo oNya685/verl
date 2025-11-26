@@ -1,12 +1,9 @@
-# Tested successfully on the hiyouga/verl:ngc-th2.6.0-cu126-vllm0.8.4-flashinfer0.2.2-cxx11abi0 image.
-# It outperforms the Qwen2 7B base model by two percentage points on the test set of GSM8K.
-
 set -x
-project_name='grpo_b128_mb16_4b_base'
-experiment_name='20251121'
-model_path=huggingface.co/Qwen/Qwen3-4B-Base
-train_files='[data/dapo/train.parquet,data/math/train.parquet]'
-test_files='[data/aime25/test_16.parquet,data/aime24/test_16.parquet,data/amc23/test_16.parquet,data/math500/test.parquet,data/minerva/test.parquet,data/olympiad/test.parquet]'
+project_name='grpo_math'
+experiment_name='b128n8_mb16_7b'
+model_path=huggingface.co/Qwen/Qwen2.5-7B-Instruct
+train_files='[data/math/train.parquet]'
+test_files='[data/math/test.parquet]'
 
 mkdir -p "outputs/$project_name/$experiment_name"
 script_path="${BASH_SOURCE[0]}"
@@ -17,7 +14,7 @@ fi
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.use_base=true\
+    algorithm.norm_adv_by_std_in_grpo=True \
     data.train_files=$train_files \
     data.val_files=$test_files \
     data.train_batch_size=128 \
@@ -25,23 +22,27 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.scheduler.enable=false \
     actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.kl_loss_coef=0.001 \
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.entropy_coeff=0 \
+    actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=8 \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=true \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
-    trainer.val_before_train=false \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
+    algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.rollout_data_dir="outputs/$project_name/$experiment_name/train" \
     trainer.validation_data_dir="outputs/$project_name/$experiment_name/validate" \
