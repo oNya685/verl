@@ -126,3 +126,28 @@ datagen:
 
 # Additional kwargs when calling tokenizer.apply_chat_template
 apply_chat_template_kwargs: {}
+
+# ===== Weighted Sampling Configuration =====
+# Enable weighted sampling for training data
+enable_weighted_sampling: False
+
+# Update interval for weights (in training steps)
+weight_update_interval: 100
+
+# Batch size for weight update
+weight_update_batch_size: 32
+
+# Epsilon value for weight calculation (w = sqrt(v * (1-v)) + eps)
+weight_eps: 0.001
+
+# Initial v value for weight calculation
+initial_v: 0.5
+
+# Minimum weight to prevent samples from never being sampled
+min_weight: 0.01
+
+# Whether to use dynamic weighted sampler
+use_dynamic_weighted_sampler: False
+
+# Number of batches per epoch for weighted sampler (null means auto-calculate)
+num_batches_per_epoch: null
