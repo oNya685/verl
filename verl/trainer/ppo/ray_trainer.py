@@ -388,11 +388,10 @@ class RayPPOTrainer:
         # Check if we're using a batch sampler (like WeightedBatchSampler or DynamicWeightedSampler)
         from verl.utils.dataset.weighted_sampler import WeightedBatchSampler, DynamicWeightedSampler
         if isinstance(train_sampler, (WeightedBatchSampler, DynamicWeightedSampler)):
-            # When using batch_sampler, do NOT specify batch_size
+            # When using batch_sampler, do NOT specify batch_size, shuffle, sampler, or drop_last
             self.train_dataloader = StatefulDataLoader(
                 dataset=self.train_dataset,
                 num_workers=num_workers,
-                drop_last=True,
                 collate_fn=collate_fn,
                 batch_sampler=train_sampler,  # Use batch_sampler instead of sampler
             )
