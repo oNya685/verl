@@ -4,8 +4,13 @@
 set -x
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
+    algorithm.adv_estimator=spo \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
+    reward_estimator.enable=True \
+    reward_estimator.hidden_size=3584 \
+    algorithm.norm_adv_by_std_in_grpo=True \
+    actor_rollout_ref.actor.output_hidden_states=True \
+    actor_rollout_ref.actor.output_hidden_states_mode='prompt_last' \
     data.train_files=data/gsm8k/train.parquet \
     data.val_files=data/gsm8k/test.parquet \
     data.train_batch_size=256 \
@@ -37,8 +42,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console", "tensorboard"]' \
-    trainer.project_name='verl_gspo_gsm8k' \
-    trainer.experiment_name='qwen2.5_7b' \
+    trainer.project_name='verl_linearpo_gsm8k' \
+    trainer.experiment_name='batch_mean_vs_group_mean' \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
