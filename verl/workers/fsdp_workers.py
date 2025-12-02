@@ -3045,6 +3045,8 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                 # Predicted Probability of Correctness
                 estimated_rewards = torch.sigmoid(logits)
 
+            # Keep on CPU for consistency with other workers
+            # The trainer will handle device placement as needed
             output = DataProto.from_dict(tensors={"estimated_rewards": estimated_rewards.cpu()})
             return output
         finally:
@@ -3099,7 +3101,16 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             with torch.no_grad():
                 pred_probs = torch.sigmoid(logits)
                 metrics["reward_estimator/mean_predicted_prob"] = pred_probs.mean().item()
+                metrics["reward_estimator/std_predicted_prob"] = pred_probs.std().item()
+                metrics["reward_estimator/min_predicted_prob"] = pred_probs.min().item()
+                metrics["reward_estimator/max_predicted_prob"] = pred_probs.max().item()
                 metrics["reward_estimator/mean_target"] = target_rewards.float().mean().item()
+                
+                # 计算预测准确度（如果target是0/1）
+                if torch.all((target_rewards == 0) | (target_rewards == 1)):
+                    pred_binary = (pred_probs > 0.5).float()
+                    accuracy = (pred_binary == target_rewards.float()).float().mean()
+                    metrics["reward_estimator/accuracy"] = accuracy.item()
 
                 indices = data.non_tensor_batch["uid"]
                 

@@ -5,6 +5,12 @@ model_path=huggingface.co/Qwen/Qwen2.5-7B-Instruct
 train_files='[data/math/train.parquet]'
 test_files='[data/math/test.parquet]'
 
+# 权重采样开关 (默认关闭，设为true启用)
+ENABLE_WEIGHTED_SAMPLING=false
+# 如果启用权重采样，可以调整以下参数
+WEIGHT_UPDATE_INTERVAL=50       # 每50步更新一次权重
+WEIGHT_UPDATE_BATCH_SIZE=32     # 权重更新时的批次大小
+
 mkdir -p "outputs/$project_name/$experiment_name"
 script_path="${BASH_SOURCE[0]}"
 if [ -f "$script_path" ]; then
@@ -27,6 +33,9 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
+    data.enable_weighted_sampling=$ENABLE_WEIGHTED_SAMPLING \
+    data.weight_update_interval=$WEIGHT_UPDATE_INTERVAL \
+    data.weight_update_batch_size=$WEIGHT_UPDATE_BATCH_SIZE \
     actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \

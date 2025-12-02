@@ -346,6 +346,10 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        
+        # Initialize weight update manager if weighted sampling is enabled
+        self.weight_update_manager = None
+        self.weight_update_enabled = False
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -790,6 +794,25 @@ class RayPPOTrainer:
             self.async_rollout_manager = AgentLoopManager(
                 config=self.config, worker_group=self.actor_rollout_wg, rm_wg=self.rm_wg
             )
+        
+        # Initialize weight update manager if weighted sampling is enabled
+        if self.config.data.get("enable_weighted_sampling", False) and self.use_reward_estimator:
+            from verl.trainer.ppo.weight_update_manager import SyncWeightUpdateManager
+            from verl.utils.dataset.weighted_rl_dataset import WeightedRLHFDataset
+            
+            # Check if train_dataset is WeightedRLHFDataset
+            if isinstance(self.train_dataset, WeightedRLHFDataset):
+                self.weight_update_manager = SyncWeightUpdateManager(
+                    dataset=self.train_dataset,
+                    tokenizer=self.tokenizer,
+                    actor_worker_group=self.actor_rollout_wg,
+                    reward_estimator_worker_group=self.reward_estimator_wg,
+                    update_interval=self.config.data.get("weight_update_interval", 100),
+                    batch_size=self.config.data.get("weight_update_batch_size", 32),
+                    max_output_length=1,
+                )
+                self.weight_update_enabled = True
+                print(f"Weighted sampling enabled with update interval: {self.config.data.get('weight_update_interval', 100)}")
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
@@ -1257,6 +1280,17 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+                        
+                        # Add SPO-specific monitoring metrics
+                        if self.config.algorithm.adv_estimator == AdvantageEstimator.SPO and "estimated_rewards" in batch.batch:
+                            spo_metrics = {
+                                "spo/baseline_mean": batch.batch["estimated_rewards"].mean().item(),
+                                "spo/baseline_std": batch.batch["estimated_rewards"].std().item(),
+                                "spo/advantage_mean": batch.batch["advantages"].mean().item(),
+                                "spo/advantage_std": torch.std(batch.batch["advantages"][batch.batch["response_mask"].bool()]).item(),
+                                "spo/reward_mean": batch.batch["token_level_rewards"].sum(dim=-1).mean().item(),
+                            }
+                            metrics.update(spo_metrics)
 
                     # update critic
                     if self.use_critic:
@@ -1359,6 +1393,19 @@ class RayPPOTrainer:
 
                 progress_bar.update(1)
                 self.global_steps += 1
+                
+                # Update dataset weights if weighted sampling is enabled
+                if self.weight_update_enabled:
+                    self.weight_update_manager.step()
+                    if self.weight_update_manager.should_update():
+                        with marked_timer("weight_update", timing_raw, color="magenta"):
+                            print(f"Updating dataset weights at step {self.global_steps}...")
+                            self.weight_update_manager.update_dataset_weights()
+                            
+                            # Log weight statistics
+                            weight_stats = self.weight_update_manager.get_stats()
+                            weight_metrics = {f"weight_manager/{k}": v for k, v in weight_stats.items()}
+                            logger.log(data=weight_metrics, step=self.global_steps)
 
                 if (
                     hasattr(self.config.actor_rollout_ref.actor, "profiler")

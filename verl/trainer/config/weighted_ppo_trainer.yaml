@@ -1,0 +1,151 @@
+# 加权PPO训练配置文件
+# 基于标准PPO配置，添加动态权重采样相关参数
+
+defaults:
+  - _self_
+  - actor: actor
+  - critic: critic
+  - reward_model: reward_model
+  - algorithm: ppo_algo
+  - rollout: rollout
+
+# 启用加权采样
+enable_weighted_sampling: true
+
+# 权重更新相关配置
+weight_update_interval: 100  # 每100个step更新一次权重
+weight_update_batch_size: 32  # 权重更新时的批次大小
+
+# 数据配置
+data:
+  # 标准数据配置
+  train_files: ${hydra:runtime.cwd}/data/train.parquet
+  val_files: ${hydra:runtime.cwd}/data/val.parquet
+  
+  # tokenizer相关
+  prompt_key: prompt
+  max_prompt_length: 1024
+  filter_overlong_prompts: true
+  shuffle: false  # 使用加权采样时不需要shuffle
+  
+  # 加权采样相关参数
+  weight_eps: 0.001  # 权重计算中的epsilon
+  initial_v: 0.5  # 初始v值
+  use_dynamic_sampler: true  # 使用动态采样器
+  num_batches_per_epoch: 1000  # 每个epoch的批次数
+  
+  # 缓存配置
+  cache_dir: ~/.cache/verl/weighted_rlhf
+  use_shm: false
+  
+  # 其他配置
+  truncation: error
+  filter_overlong_prompts_workers: 4
+  seed: 42
+
+# Actor配置
+actor_rollout_ref:
+  model:
+    path: ${MODEL_PATH}
+    use_shm: false
+  
+  actor:
+    strategy: fsdp
+    use_kl_loss: false
+    output_hidden_states: true  # 必须启用以提取hidden states
+    output_hidden_states_mode: prompt_mean  # prompt_last, prompt_mean, response_last, response_mean
+    grad_clip: 1.0
+    learning_rate: 5e-6
+    
+  rollout:
+    mode: batch
+    temperature: 1.0
+    max_new_tokens: 512
+    
+# Critic配置
+critic:
+  strategy: fsdp
+  learning_rate: 5e-6
+  grad_clip: 1.0
+  
+# Reward Estimator配置（用于计算v值）
+reward_estimator:
+  enable: true
+  strategy: fsdp
+  
+  model:
+    hidden_size: 3584  # 需要匹配actor的hidden size
+    mlp_hidden_dim: 512
+    fsdp_config:
+      model_dtype: fp32
+  
+  # 训练参数
+  learning_rate: 1e-4
+  lr_scheduler_type: cosine
+  total_training_steps: 435  # 15 epochs * 29 steps per epoch
+  lr_warmup_steps_ratio: 0.01
+  min_lr_ratio: 0.1
+  
+  # 特征归一化
+  normalize_features: true
+  
+  # CPU offload（节省显存）
+  offload_to_cpu: true
+  
+# Reward Model配置
+reward_model:
+  enable: true
+  strategy: fsdp
+  path: ${REWARD_MODEL_PATH}
+  
+# 算法配置
+algorithm:
+  use_kl_in_reward: true
+  kl_penalty_weight: 0.1
+  
+  # PPO超参数
+  ppo_epochs: 4
+  mini_batch_size: 1
+  clip_range: 0.2
+  value_clip: 0.2
+  
+  # GAE参数
+  gamma: 1.0
+  lam: 0.95
+  
+# 训练器配置
+trainer:
+  total_epochs: 15
+  train_batch_size: 128
+  eval_batch_size: 32
+  
+  # 分布式配置
+  nnodes: 1
+  n_gpus_per_node: 8
+  
+  # 检查点配置
+  save_freq: 100
+  eval_freq: 50
+  log_freq: 10
+  
+  # 其他配置
+  use_legacy_worker_impl: auto
+  
+# Ray配置
+ray_kwargs:
+  ray_init:
+    num_cpus: 32
+    num_gpus: 8
+    runtime_env:
+      env_vars:
+        NCCL_DEBUG: INFO
+        TOKENIZERS_PARALLELISM: false
+        VLLM_ALLOW_RUNTIME_LORA_UPDATING: true
+        
+# 实验追踪
+experiment:
+  name: weighted_ppo_training
+  tags:
+    - weighted_sampling
+    - reward_estimator
+    - dynamic_weights

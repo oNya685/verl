@@ -354,7 +354,12 @@ def compute_spo_outcome_advantage(
             small value to avoid division by zero
     """
     scores = token_level_rewards.sum(dim=-1)    # (bs,)
-    reward_baselines = torch.clamp(reward_baselines, min=1e-2, max=1-1e-2)
+    # Ensure device consistency
+    if reward_baselines.device != scores.device:
+        reward_baselines = reward_baselines.to(scores.device)
+    # Use smaller epsilon for clamping to preserve more information
+    # Only clamp extreme values that might cause numerical issues
+    reward_baselines = torch.clamp(reward_baselines, min=1e-4, max=1-1e-4)
     advantages = scores - reward_baselines     # (bs,)
 
     with torch.no_grad():

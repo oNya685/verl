@@ -376,9 +376,14 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
 
     from verl.utils.dataset.rl_dataset import RLHFDataset
 
+    # Check if weighted sampling is enabled
+    if data_config.get("enable_weighted_sampling", False) and is_train:
+        from verl.utils.dataset.weighted_rl_dataset import WeightedRLHFDataset
+        dataset_cls = WeightedRLHFDataset
+        print("Using WeightedRLHFDataset for weighted sampling.")
     # Check if a custom dataset class is specified in the data configuration
     # and if the path to the custom class is provided
-    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
+    elif "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
         # Dynamically load the custom dataset class
         dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
         # Verify that the custom dataset class inherits from torch.utils.data.Dataset
@@ -423,7 +428,28 @@ def create_rl_sampler(data_config, dataset):
     import torch
     from torch.utils.data import RandomSampler, SequentialSampler
 
-    if data_config.sampler is not None and data_config.sampler.get("class_path", None) is not None:
+    # Check if weighted sampling is enabled
+    if data_config.get("enable_weighted_sampling", False):
+        from verl.utils.dataset.weighted_sampler import WeightedBatchSampler, DynamicWeightedSampler
+        
+        # Use dynamic sampler if specified
+        if data_config.get("use_dynamic_weighted_sampler", False):
+            sampler = DynamicWeightedSampler(
+                dataset=dataset,
+                batch_size=data_config.get("train_batch_size", 128),
+                update_interval=data_config.get("weight_update_interval", 100),
+                seed=data_config.get("seed")
+            )
+            print("Using DynamicWeightedSampler for weighted batch sampling.")
+        else:
+            sampler = WeightedBatchSampler(
+                dataset=dataset,
+                batch_size=data_config.get("train_batch_size", 128),
+                num_batches=data_config.get("num_batches_per_epoch"),
+                seed=data_config.get("seed")
+            )
+            print("Using WeightedBatchSampler for weighted batch sampling.")
+    elif data_config.sampler is not None and data_config.sampler.get("class_path", None) is not None:
         curriculum_class = load_extern_type(
             data_config.sampler.class_path,
             data_config.sampler.class_name,
