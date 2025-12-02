@@ -76,8 +76,9 @@ class WeightedBatchSampler(Sampler):
         if self.num_batches is not None:
             return self.num_batches
         else:
-            # 如果没有指定批次数，返回一个默认值
-            return len(self.dataset) // self.batch_size
+            # 如果没有指定批次数，至少返回1个批次
+            # 确保dataloader不为空
+            return max(1, len(self.dataset) // self.batch_size)
     
     def set_epoch(self, epoch: int):
         """设置epoch，用于改变随机种子"""
@@ -139,7 +140,8 @@ class DynamicWeightedSampler(Sampler):
     
     def __len__(self):
         """返回一个epoch的批次数"""
-        return len(self.dataset) // self.batch_size
+        # 至少返回1个批次，确保dataloader不为空
+        return max(1, len(self.dataset) // self.batch_size)
     
     def add_weight_update(self, indices: np.ndarray, v_values: np.ndarray):
         """
