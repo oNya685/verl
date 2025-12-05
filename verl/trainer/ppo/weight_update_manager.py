@@ -71,7 +71,7 @@ class WeightUpdateManager:
         """增加步数计数"""
         self.step_count += 1
     
-    async def update_dataset_weights(self):
+                                                                                 
         """
         异步更新整个数据集的权重
         """
@@ -139,17 +139,21 @@ class WeightUpdateManager:
                         "micro_batch_size": len(batch),
                         "temperature": 1.0,
                         "use_dynamic_bsz": False,
+                        "calculate_entropy": False,  # 不需要计算entropy
+                        "enable_hidden_states": True,  # 需要hidden states
                     }
                 )
                 
                 # 使用actor计算hidden states
                 with torch.no_grad():
-                    # 调用actor的compute_log_prob方法，启用hidden_states输出
-                    log_probs, entropy, hidden_states = await self.actor_worker_group.async_compute_log_prob(
-                        data_proto, 
-                        calculate_entropy=False,
-                        enable_hidden_states=True
-                    )
+                    # 调用actor的compute_log_prob方法
+                    output = self.actor_worker_group.compute_log_prob(data_proto)
+                    
+                    if isinstance(output, tuple) and len(output) == 3:
+                        log_probs, entropy, hidden_states = output
+                    else:
+                        # Output might be a DataProto
+                        hidden_states = output.batch.get("hidden_states") if hasattr(output, 'batch') else None
                 
                 if hidden_states is None:
                     logger.warning(f"Batch {batch_idx}: hidden_states is None, skipping")
@@ -161,7 +165,7 @@ class WeightUpdateManager:
                 )
                 
                 # 使用reward estimator计算v值
-                reward_output = await self.reward_estimator_worker_group.async_compute_estimated_reward(
+                reward_output = self.reward_estimator_worker_group.compute_estimated_reward(
                     estimator_data
                 )
                 
@@ -323,34 +327,35 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                         "micro_batch_size": padded_batch_size,
                         "temperature": 1.0,
                         "use_dynamic_bsz": False,
+                        "calculate_entropy": False,  # 不需要计算entropy
+                        "enable_hidden_states": True,  # 需要hidden states
                     }
                 )
                 
                 # 使用actor计算hidden states
                 with torch.no_grad():
-                    output = self.actor_worker_group.compute_log_prob(
-                        data_proto,
-                        calculate_entropy=False,
-                        enable_hidden_states=True
-                    )
+                    output = self.actor_worker_group.compute_log_prob(data_proto)
                     
-                    if len(output) == 3:
-                        log_probs, entropy, hidden_states = output
-                    else:
-                        log_probs, entropy = output
-                        # Extract hidden states from response
+                    # 处理返回值 - 可能是tuple或DataProto
+                    if isinstance(output, tuple):
+                        if len(output) >= 3:
+                            log_probs, entropy, hidden_states = output[:3]
+                        else:
+                            hidden_states = None
+                    elif hasattr(output, 'batch'):
+                        # Output is a DataProto
                         hidden_states = output.batch.get("hidden_states")
-                        if hidden_states is None:
-                            raise ValueError(
-                                "hidden_states is None. Please ensure:\n"
-                                "1. actor_rollout_ref.actor.output_hidden_states=True in your config\n"
-                                "2. actor_rollout_ref.actor.output_hidden_states_mode is set (e.g., 'prompt_last', 'prompt_mean')\n"
-                                "3. The actor worker is properly configured to output hidden states"
-                            )
-                
-                if hidden_states is None:
-                    logger.warning(f"Batch {batch_idx}: hidden_states is None, skipping")
-                    continue
+                    else:
+                        hidden_states = None
+                    
+                    if hidden_states is None:
+                        logger.error(
+                            "hidden_states is None. Please ensure:\n"
+                            "1. actor_rollout_ref.actor.output_hidden_states=True in your config\n"
+                            "2. actor_rollout_ref.actor.output_hidden_states_mode is set (e.g., 'prompt_last', 'prompt_mean')\n"
+                            "3. The actor worker is properly configured to output hidden states"
+                        )
+                        continue
                 
                 # 构建reward estimator的输入
                 estimator_data = DataProto.from_dict(
