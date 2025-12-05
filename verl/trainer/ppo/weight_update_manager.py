@@ -273,14 +273,22 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                     padding_size = world_size - (batch_size % world_size)
                     logger.info(f"Batch size {batch_size} not divisible by world_size {world_size}, padding {padding_size} samples")
                     
-                    # Padding所有tensor到可以被world_size整除
-                    for key in batch.keys():
+                    # Padding所有tensor到可以被world_size整除，并移除非tensor数据
+                    keys_to_remove = []
+                    for key in list(batch.keys()):  # 使用list()创建副本，避免在迭代时修改
                         if isinstance(batch[key], torch.Tensor):
                             pad_shape = list(batch[key].shape)
                             pad_shape[0] = padding_size
                             # 使用第一个样本作为padding（或者使用zeros）
                             padding = batch[key][:1].repeat(padding_size, *([1] * (len(pad_shape) - 1)))
                             batch[key] = torch.cat([batch[key], padding], dim=0)
+                        else:
+                            # 记录非tensor的key，稍后移除（它们不需要传给actor）
+                            keys_to_remove.append(key)
+                    
+                    # 移除非tensor数据，避免batch size不匹配
+                    for key in keys_to_remove:
+                        batch.pop(key, None)
                     
                     # 更新batch_size
                     padded_batch_size = batch_size + padding_size
@@ -292,18 +300,25 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                 else:
                     padded_batch_size = batch_size
                     original_indices = dataset_indices
+                    # 即使不需要padding，也移除非tensor数据
+                    keys_to_remove = []
+                    for key in list(batch.keys()):
+                        if not isinstance(batch[key], torch.Tensor):
+                            keys_to_remove.append(key)
+                    for key in keys_to_remove:
+                        batch.pop(key, None)
                 
                 batch["responses"] = batch["responses"][:, :1] if "responses" in batch else torch.zeros((padded_batch_size, 1), dtype=torch.long)
                 
-                # 将batch转换为普通dict（如果它是TensorDict）
-                if hasattr(batch, "items"):
-                    batch_dict = {k: v for k, v in batch.items()}
-                else:
-                    batch_dict = batch
+                # 过滤出只包含tensor的dict
+                tensor_dict = {}
+                for key, value in batch.items():
+                    if isinstance(value, torch.Tensor):
+                        tensor_dict[key] = value
                 
-                # 构建DataProto - 使用from_dict方法
+                # 构建DataProto - 使用from_dict方法，只传递tensor数据
                 data_proto = DataProto.from_dict(
-                    tensors=batch_dict,
+                    tensors=tensor_dict,
                     meta_info={
                         "micro_batch_size": padded_batch_size,
                         "temperature": 1.0,
