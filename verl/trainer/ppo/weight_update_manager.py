@@ -156,8 +156,8 @@ class WeightUpdateManager:
                     continue
                 
                 # 构建reward estimator的输入
-                estimator_data = DataProto(
-                    batch={"hidden_states": hidden_states}
+                estimator_data = DataProto.from_dict(
+                    tensors={"hidden_states": hidden_states}
                 )
                 
                 # 使用reward estimator计算v值
@@ -168,8 +168,13 @@ class WeightUpdateManager:
                 # 提取v值（estimated_rewards）
                 v_values = reward_output.batch["estimated_rewards"].cpu().numpy()
                 
-                # 收集结果
-                all_indices.extend(dataset_indices)
+                # 收集结果 - 确保indices是数值类型
+                if isinstance(dataset_indices, list) and dataset_indices:
+                    # 如果是list of numpy scalars or integers
+                    dataset_indices_list = [int(idx) if hasattr(idx, 'item') else int(idx) for idx in dataset_indices]
+                else:
+                    dataset_indices_list = dataset_indices
+                all_indices.extend(dataset_indices_list)
                 all_v_values.extend(v_values)
                 
                 if (batch_idx + 1) % 10 == 0:
@@ -181,8 +186,9 @@ class WeightUpdateManager:
         
         # 更新数据集权重
         if all_indices:
-            indices_array = np.array(all_indices)
-            v_values_array = np.array(all_v_values)
+            # 确保indices是int类型的numpy array
+            indices_array = np.array(all_indices, dtype=np.int64)
+            v_values_array = np.array(all_v_values, dtype=np.float32)
             
             self.dataset.update_weights_from_v(indices_array, v_values_array)
             
@@ -245,9 +251,15 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                 # 确保dataset_indices是torch tensor
                 if not isinstance(dataset_indices, torch.Tensor):
                     if isinstance(dataset_indices, np.ndarray):
-                        dataset_indices = torch.from_numpy(dataset_indices)
+                        # 如果是object dtype的numpy array，先转换为int64
+                        if dataset_indices.dtype == np.object_ or dataset_indices.dtype.kind == 'O':
+                            dataset_indices = dataset_indices.astype(np.int64)
+                        dataset_indices = torch.from_numpy(dataset_indices).to('cpu')
                     else:
-                        dataset_indices = torch.tensor(dataset_indices)
+                        dataset_indices = torch.tensor(dataset_indices, dtype=torch.long, device='cpu')
+                else:
+                    # 如果已经是tensor，确保在CPU上
+                    dataset_indices = dataset_indices.cpu()
                 
                 # 只使用prompt部分
                 # 截断responses为1个token
@@ -274,8 +286,8 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                     padded_batch_size = batch_size + padding_size
                     # 记录原始indices的数量，padding的indices设为-1
                     original_indices = dataset_indices
-                    # 使用torch.long作为dtype，这是indices的标准类型
-                    padding_indices = torch.full((padding_size,), -1, dtype=torch.long)
+                    # 使用torch.long作为dtype，这是indices的标准类型，并确保在CPU上
+                    padding_indices = torch.full((padding_size,), -1, dtype=torch.long, device='cpu')
                     dataset_indices = torch.cat([dataset_indices, padding_indices])
                 else:
                     padded_batch_size = batch_size
@@ -357,10 +369,10 @@ class SyncWeightUpdateManager(WeightUpdateManager):
         
         # 更新数据集权重
         if all_indices:
-            self.dataset.update_weights_from_v(
-                np.array(all_indices),
-                np.array(all_v_values)
-            )
+            # 确保indices是int类型的numpy array
+            indices_array = np.array(all_indices, dtype=np.int64)
+            v_values_array = np.array(all_v_values, dtype=np.float32)
+            self.dataset.update_weights_from_v(indices_array, v_values_array)
             
             stats = self.dataset.get_weight_stats()
             logger.info(f"Weight update #{self.update_count + 1} completed. Stats: {stats}")
