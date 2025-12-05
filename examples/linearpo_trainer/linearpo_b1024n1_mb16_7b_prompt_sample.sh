@@ -1,13 +1,13 @@
 set -x
-project_name='linearpo_prompt_last_math_sample'
+project_name='linearpo_prompt_last_math_prompt_sample'
 experiment_name='b1024n1_mb16_7b_norm_adv'
 model_path=huggingface.co/Qwen/Qwen2.5-7B-Instruct
 train_files='[data/math/train.parquet]'
 test_files='[data/math/test.parquet]'
 
 ENABLE_WEIGHTED_SAMPLING=true
-WEIGHT_UPDATE_INTERVAL=50
-WEIGHT_UPDATE_BATCH_SIZE=32
+WEIGHT_UPDATE_INTERVAL=30
+WEIGHT_UPDATE_BATCH_SIZE=1024
 
 mkdir -p "outputs/$project_name/$experiment_name"
 script_path="${BASH_SOURCE[0]}"
@@ -57,14 +57,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.rollout_data_dir="outputs/$project_name/$experiment_name/train" \
-    trainer.validation_data_dir="outputs/$project_name/$experiment_name/validate" \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=$project_name \
     trainer.experiment_name=$experiment_name \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
+    trainer.save_freq=200 \
     trainer.test_freq=20 \
     trainer.total_training_steps=300 \
     2>&1 | tee -a "outputs/$project_name/$experiment_name/output.log"
