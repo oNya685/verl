@@ -127,9 +127,9 @@ class WeightUpdateManager:
                 # 生成一个token的响应以获取hidden states
                 responses = torch.zeros((len(batch), 1), dtype=torch.long)
                 
-                # 构建DataProto
-                data_proto = DataProto(
-                    batch={
+                # 构建DataProto - 使用from_dict方法
+                data_proto = DataProto.from_dict(
+                    tensors={
                         "input_ids": input_ids,
                         "attention_mask": attention_mask,
                         "position_ids": position_ids,
@@ -238,13 +238,20 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                 
                 # 只使用prompt部分
                 # 截断responses为1个token
-                batch["responses"] = batch["responses"][:, :1] if "responses" in batch else torch.zeros((batch["input_ids"].size(0), 1), dtype=torch.long)
+                batch_size = batch["input_ids"].size(0)
+                batch["responses"] = batch["responses"][:, :1] if "responses" in batch else torch.zeros((batch_size, 1), dtype=torch.long)
                 
-                # 构建DataProto
-                data_proto = DataProto(
-                    batch=batch,
+                # 将batch转换为普通dict（如果它是TensorDict）
+                if hasattr(batch, "items"):
+                    batch_dict = {k: v for k, v in batch.items()}
+                else:
+                    batch_dict = batch
+                
+                # 构建DataProto - 使用from_dict方法
+                data_proto = DataProto.from_dict(
+                    tensors=batch_dict,
                     meta_info={
-                        "micro_batch_size": batch["input_ids"].size(0),
+                        "micro_batch_size": batch_size,
                         "temperature": 1.0,
                         "use_dynamic_bsz": False,
                     }
