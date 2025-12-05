@@ -242,6 +242,13 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                     logger.warning(f"Batch {batch_idx}: No dataset_index found")
                     continue
                 
+                # 确保dataset_indices是torch tensor
+                if not isinstance(dataset_indices, torch.Tensor):
+                    if isinstance(dataset_indices, np.ndarray):
+                        dataset_indices = torch.from_numpy(dataset_indices)
+                    else:
+                        dataset_indices = torch.tensor(dataset_indices)
+                
                 # 只使用prompt部分
                 # 截断responses为1个token
                 batch_size = batch["input_ids"].size(0)
@@ -267,10 +274,9 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                     padded_batch_size = batch_size + padding_size
                     # 记录原始indices的数量，padding的indices设为-1
                     original_indices = dataset_indices
-                    dataset_indices = torch.cat([
-                        dataset_indices,
-                        torch.full((padding_size,), -1, dtype=dataset_indices.dtype)
-                    ])
+                    # 使用torch.long作为dtype，这是indices的标准类型
+                    padding_indices = torch.full((padding_size,), -1, dtype=torch.long)
+                    dataset_indices = torch.cat([dataset_indices, padding_indices])
                 else:
                     padded_batch_size = batch_size
                     original_indices = dataset_indices
