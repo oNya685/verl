@@ -218,11 +218,17 @@ class SyncWeightUpdateManager(WeightUpdateManager):
         
         # 创建数据加载器
         from verl.utils.dataset.rl_dataset import collate_fn
+        
+        # 获取worker group的world_size以确定是否需要drop_last
+        world_size = getattr(self.actor_worker_group, 'world_size', 1)
+        drop_last = False  # 不丢弃最后的batch，我们会手动padding
+        
         dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            collate_fn=collate_fn
+            collate_fn=collate_fn,
+            drop_last=drop_last
         )
         
         all_indices = []
@@ -239,7 +245,37 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                 # 只使用prompt部分
                 # 截断responses为1个token
                 batch_size = batch["input_ids"].size(0)
-                batch["responses"] = batch["responses"][:, :1] if "responses" in batch else torch.zeros((batch_size, 1), dtype=torch.long)
+                
+                # 检查是否需要padding以满足并行度要求
+                # 获取worker group的world_size (GPU数量)
+                world_size = getattr(self.actor_worker_group, 'world_size', 1)
+                if world_size > 1 and batch_size % world_size != 0:
+                    # 计算需要padding的数量
+                    padding_size = world_size - (batch_size % world_size)
+                    logger.info(f"Batch size {batch_size} not divisible by world_size {world_size}, padding {padding_size} samples")
+                    
+                    # Padding所有tensor到可以被world_size整除
+                    for key in batch.keys():
+                        if isinstance(batch[key], torch.Tensor):
+                            pad_shape = list(batch[key].shape)
+                            pad_shape[0] = padding_size
+                            # 使用第一个样本作为padding（或者使用zeros）
+                            padding = batch[key][:1].repeat(padding_size, *([1] * (len(pad_shape) - 1)))
+                            batch[key] = torch.cat([batch[key], padding], dim=0)
+                    
+                    # 更新batch_size
+                    padded_batch_size = batch_size + padding_size
+                    # 记录原始indices的数量，padding的indices设为-1
+                    original_indices = dataset_indices
+                    dataset_indices = torch.cat([
+                        dataset_indices,
+                        torch.full((padding_size,), -1, dtype=dataset_indices.dtype)
+                    ])
+                else:
+                    padded_batch_size = batch_size
+                    original_indices = dataset_indices
+                
+                batch["responses"] = batch["responses"][:, :1] if "responses" in batch else torch.zeros((padded_batch_size, 1), dtype=torch.long)
                 
                 # 将batch转换为普通dict（如果它是TensorDict）
                 if hasattr(batch, "items"):
@@ -251,7 +287,7 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                 data_proto = DataProto.from_dict(
                     tensors=batch_dict,
                     meta_info={
-                        "micro_batch_size": batch_size,
+                        "micro_batch_size": padded_batch_size,
                         "temperature": 1.0,
                         "use_dynamic_bsz": False,
                     }
@@ -284,8 +320,8 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                     continue
                 
                 # 构建reward estimator的输入
-                estimator_data = DataProto(
-                    batch={"hidden_states": hidden_states}
+                estimator_data = DataProto.from_dict(
+                    tensors={"hidden_states": hidden_states}
                 )
                 
                 # 使用reward estimator计算v值
@@ -293,12 +329,21 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                     estimator_data
                 )
                 
-                # 提取v值
-                v_values = reward_output.batch["estimated_rewards"].cpu().numpy()
+                v_values = reward_output.batch["estimated_rewards"]
+                
+                # 如果有padding，只保留原始样本的结果
+                if batch_size < padded_batch_size:
+                    v_values = v_values[:batch_size]
+                    dataset_indices = original_indices
                 
                 # 收集结果
-                all_indices.extend(dataset_indices.tolist())
-                all_v_values.extend(v_values)
+                if isinstance(dataset_indices, torch.Tensor):
+                    dataset_indices_list = dataset_indices.cpu().numpy().tolist()
+                else:
+                    dataset_indices_list = dataset_indices.tolist() if hasattr(dataset_indices, 'tolist') else list(dataset_indices)
+                
+                all_indices.extend(dataset_indices_list)
+                all_v_values.extend(v_values.cpu().numpy().tolist() if isinstance(v_values, torch.Tensor) else v_values)
                 
             except Exception as e:
                 logger.error(f"Error processing batch {batch_idx}: {e}")
