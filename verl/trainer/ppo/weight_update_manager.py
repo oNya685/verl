@@ -71,7 +71,7 @@ class WeightUpdateManager:
         """增加步数计数"""
         self.step_count += 1
     
-                                                                                 
+    def update_dataset_weights(self):
         """
         异步更新整个数据集的权重
         """
@@ -90,78 +90,89 @@ class WeightUpdateManager:
         
         for batch_idx, batch in enumerate(dataloader):
             try:
-                # 提取batch中的数据
-                input_ids_list = []
-                attention_mask_list = []
-                position_ids_list = []
+                # 收集每个样本的indices和hidden states
                 dataset_indices = []
+                all_hidden_states = []
                 
                 for sample in batch:
-                    # 只取prompt部分，设置response长度为1
+                    # 只取prompt部分，添加一个dummy response token
                     prompt_length = len(sample["raw_prompt_ids"])
                     
-                    # 截断到prompt部分
-                    input_ids = sample["input_ids"][:prompt_length]
-                    attention_mask = sample["attention_mask"][:prompt_length]
+                    # 构建单个样本的输入（prompt + 1个response token）
+                    input_ids = torch.cat([
+                        sample["input_ids"][:prompt_length],
+                        torch.zeros(1, dtype=torch.long, device=sample["input_ids"].device)
+                    ])
+                    attention_mask = torch.cat([
+                        sample["attention_mask"][:prompt_length],
+                        torch.ones(1, dtype=torch.long, device=sample["attention_mask"].device)  
+                    ])
                     position_ids = sample["position_ids"]
                     if position_ids.dim() == 2:
-                        position_ids = position_ids[:, :prompt_length]
+                        position_ids = torch.cat([
+                            position_ids[:, :prompt_length],
+                            position_ids[:, prompt_length:prompt_length+1]
+                        ], dim=1)
                     else:
-                        position_ids = position_ids[:prompt_length]
+                        # 1D position_ids
+                        if len(position_ids) > prompt_length:
+                            position_ids = torch.cat([
+                                position_ids[:prompt_length],
+                                position_ids[prompt_length:prompt_length+1]
+                            ])
+                        else:
+                            # 如果position_ids不够长，生成新的
+                            position_ids = torch.cat([
+                                position_ids[:prompt_length],
+                                torch.tensor([prompt_length], dtype=torch.long, device=position_ids.device)
+                            ])
                     
-                    input_ids_list.append(input_ids)
-                    attention_mask_list.append(attention_mask)
-                    position_ids_list.append(position_ids)
                     dataset_indices.append(sample["dataset_index"])
-                
-                # 堆叠成batch tensor
-                input_ids = torch.stack(input_ids_list)
-                attention_mask = torch.stack(attention_mask_list)
-                
-                # 处理position_ids（可能是2D或3D）
-                if position_ids_list[0].dim() == 2:
-                    position_ids = torch.stack(position_ids_list)
-                else:
-                    position_ids = torch.stack(position_ids_list)
-                
-                # 生成一个token的响应以获取hidden states
-                responses = torch.zeros((len(batch), 1), dtype=torch.long)
-                
-                # 构建DataProto - 使用from_dict方法
-                data_proto = DataProto.from_dict(
-                    tensors={
-                        "input_ids": input_ids,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "responses": responses,
-                    },
-                    meta_info={
-                        "micro_batch_size": len(batch),
-                        "temperature": 1.0,
-                        "use_dynamic_bsz": False,
-                        "calculate_entropy": False,  # 不需要计算entropy
-                        "enable_hidden_states": True,  # 需要hidden states
-                    }
-                )
-                
-                # 使用actor计算hidden states
-                with torch.no_grad():
-                    # 调用actor的compute_log_prob方法
-                    output = self.actor_worker_group.compute_log_prob(data_proto)
                     
-                    if isinstance(output, tuple) and len(output) == 3:
-                        log_probs, entropy, hidden_states = output
-                    else:
-                        # Output might be a DataProto
-                        hidden_states = output.batch.get("hidden_states") if hasattr(output, 'batch') else None
+                    # 构建单样本的DataProto
+                    single_data_proto = DataProto.from_dict(
+                        tensors={
+                            "input_ids": input_ids.unsqueeze(0),  # Add batch dimension
+                            "attention_mask": attention_mask.unsqueeze(0),
+                            "position_ids": position_ids.unsqueeze(0) if position_ids.dim() == 1 else position_ids,
+                            "responses": torch.zeros((1, 1), dtype=torch.long, device=input_ids.device),
+                        },
+                        meta_info={
+                            "micro_batch_size": 1,
+                            "temperature": 1.0,
+                            "use_dynamic_bsz": False,
+                            "calculate_entropy": False,
+                            "enable_hidden_states": True,
+                        }
+                    )
+                    
+                    # 计算单个样本的hidden states
+                    with torch.no_grad():
+                        output = self.actor_worker_group.compute_log_prob(single_data_proto)
+                        
+                        if isinstance(output, tuple) and len(output) == 3:
+                            _, _, hidden_states = output
+                        else:
+                            hidden_states = output.batch.get("hidden_states") if hasattr(output, 'batch') else None
+                    
+                    if hidden_states is None:
+                        logger.warning(f"Sample in batch {batch_idx}: hidden_states is None, skipping")
+                        dataset_indices.pop()  # Remove the last added index
+                        continue
+                    
+                    all_hidden_states.append(hidden_states)
                 
-                if hidden_states is None:
-                    logger.warning(f"Batch {batch_idx}: hidden_states is None, skipping")
+                # Skip if no valid samples
+                if not all_hidden_states:
+                    logger.warning(f"Batch {batch_idx}: No valid samples after processing")
                     continue
+                
+                # Concatenate all hidden states
+                batch_hidden_states = torch.cat(all_hidden_states, dim=0)
                 
                 # 构建reward estimator的输入
                 estimator_data = DataProto.from_dict(
-                    tensors={"hidden_states": hidden_states}
+                    tensors={"hidden_states": batch_hidden_states}
                 )
                 
                 # 使用reward estimator计算v值
@@ -186,6 +197,8 @@ class WeightUpdateManager:
                     
             except Exception as e:
                 logger.error(f"Error processing batch {batch_idx}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
                 continue
         
         # 更新数据集权重
@@ -385,6 +398,8 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                 
             except Exception as e:
                 logger.error(f"Error processing batch {batch_idx}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
                 continue
         
         # 更新数据集权重
