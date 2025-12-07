@@ -15,6 +15,8 @@ gradient_clip_norm: 1.0   # 根据噪声强度调整（0.5-2.0）
 weight_decay: 1e-4        # 防止记忆噪声模式
 lambda_reg: 0.001
 
+offload_to_cpu: False
+
 # Whether to deploy the model to a separate resource pool.
 # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
 enable_resource_pool: False
