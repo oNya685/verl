@@ -76,7 +76,7 @@ class AlgoConfig(BaseConfig):
         kl_ctrl (KLControlConfig): KL control configuration.
         use_pf_ppo (bool): Whether to enable preference feedback PPO.
         pf_ppo (dict[str, Any]): Preference feedback PPO settings.
-        filter_groups (Optional[FilterGroupsConfig]): Filter groups configuration, used in DAPO and Entropy
+        filter_groups (FilterGroupsConfig): Filter groups configuration, used in DAPO, Entropy and LinearPO
         rollout_is_threshold (Optional[float]): Upper threshold for IS weights. null = disabled,
             float value = enabled (compute weights and metrics). This is the main on/off switch.
         rollout_is_threshold_lower (Optional[float]): Lower threshold for IS weights. If None, defaults to 1/upper.
@@ -96,7 +96,7 @@ class AlgoConfig(BaseConfig):
     kl_ctrl: KLControlConfig = field(default_factory=KLControlConfig)
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
-    filter_groups: Optional[FilterGroupsConfig] = None
+    filter_groups: FilterGroupsConfig = field(default_factory=FilterGroupsConfig)
     # Rollout Importance Sampling
     # Controls computation of IS weights and mismatch metrics
     rollout_is_threshold: Optional[float] = None  # null = disabled, float = enabled

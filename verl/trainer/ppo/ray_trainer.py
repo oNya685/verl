@@ -1321,8 +1321,7 @@ class RayPPOTrainer:
 
                     # Filter batch for actor update based on estimated reward
                     actor_batch = batch
-                    if (self.config.algorithm.filter_groups is not None and 
-                        self.config.algorithm.filter_groups.enable and
+                    if (self.config.algorithm.filter_groups.enable and
                         self.config.algorithm.filter_groups.metric == "estimated_reward" and
                         "estimated_rewards" in batch.batch):
                         
