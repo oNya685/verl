@@ -1347,6 +1347,20 @@ class RayPPOTrainer:
                         if len(keep_indices) > 0:
                             # Create filtered batch for actor update
                             actor_batch = batch[keep_indices]
+                            
+                            # Ensure batch size is divisible by world_size for multi-GPU training
+                            world_size = getattr(self.actor_rollout_wg, 'world_size', 1)
+                            if world_size > 1:
+                                batch_size = len(actor_batch)
+                                if batch_size % world_size != 0:
+                                    # Pad to nearest multiple of world_size
+                                    padding_size = world_size - (batch_size % world_size)
+                                    # Repeat last samples to pad
+                                    padding_indices = keep_indices[-padding_size:]
+                                    padded_indices = keep_indices + padding_indices
+                                    actor_batch = batch[padded_indices]
+                                    print(f"Padded actor batch from {batch_size} to {len(padded_indices)} samples for {world_size} GPUs")
+                            
                             print(f"Filtered {len(estimated_rewards) - len(keep_indices)} samples "
                                   f"({filter_metrics['filter/filter_rate']:.2%}) for actor update")
                         else:
