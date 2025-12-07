@@ -2881,6 +2881,7 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         
         # -- 优化器参数 --
         self.learning_rate = self.config.get("learning_rate", 1e-4)
+        self.weight_decay = self.config.get("weight_decay", 1e-2)  # 添加 weight_decay 配置
         self.lr_scheduler_type = self.config.get("lr_scheduler_type", "cosine")
         self.total_training_steps = self.config.get("total_training_steps", 15 * 29) 
         self.lr_warmup_steps_ratio = self.config.get("lr_warmup_steps_ratio", 0.01)
@@ -2891,11 +2892,13 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
 
         # -- MLP 配置 --
         self.mlp_hidden_dim = self.config.model.get("mlp_hidden_dim", 512)
+        self.use_deep_mlp = self.config.model.get("use_deep_mlp", True)  # 使用深层MLP架构
+        self.dropout_rate = self.config.model.get("dropout_rate", [0.4, 0.3, 0.2])  # 各层dropout率
 
         # -- Offload 配置 --
         self.offload_to_cpu = self.config.get("offload_to_cpu", True)
         
-        self.log_adapter.info(f"Worker 初始化完成 (MLP模式)。CPU Offload: {self.offload_to_cpu}, LR: {self.learning_rate}")
+        self.log_adapter.info(f"Worker 初始化完成 (MLP模式)。CPU Offload: {self.offload_to_cpu}, LR: {self.learning_rate}, WD: {self.weight_decay}")
         
     def _init_profiler(self, config: FSDPCriticConfig):
         omega_profiler_config = config.get("profiler", {})
@@ -2976,15 +2979,62 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
     def init_model(self):
         """初始化 MLP 模型和 SGD 优化器。"""
         device = 'cpu' if self.offload_to_cpu else get_device_id()
-        print(f"在设备 {device} 上初始化 MLP 模型...")
         
-        # 使用 Sequential 构建 2层 MLP
-        # 最后不加 Sigmoid，直接输出 Logits，配合 BCEWithLogitsLoss 使用
-        self.model = torch.nn.Sequential(
-            torch.nn.Linear(self.hidden_size, self.mlp_hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Linear(self.mlp_hidden_dim, 1)
-        ).to(device, dtype=self.torch_dtype)
+        if self.use_deep_mlp:
+            print(f"在设备 {device} 上初始化深层 MLP 模型 (4层架构)...")
+            # 使用改进的深层 MLP 架构，使用 LayerNorm 和 GELU
+            # LayerNorm 比 BatchNorm 更适合 batch size 变化的情况
+            # GELU 是 LLM 中标准的激活函数
+            # 逐层降维：3584 -> 1024 -> 512 -> 128 -> 1
+            
+            # 确保dropout_rate有正确的长度
+            if isinstance(self.dropout_rate, list) and len(self.dropout_rate) >= 3:
+                drop1, drop2, drop3 = self.dropout_rate[0], self.dropout_rate[1], self.dropout_rate[2]
+            else:
+                drop1, drop2, drop3 = 0.4, 0.3, 0.2
+                
+            self.model = torch.nn.Sequential(
+                # 第一层：3584 -> 1024
+                torch.nn.Linear(self.hidden_size, 1024),
+                torch.nn.LayerNorm(1024),
+                torch.nn.GELU(),
+                torch.nn.Dropout(drop1),
+                
+                # 第二层：1024 -> 512
+                torch.nn.Linear(1024, 512),
+                torch.nn.LayerNorm(512),
+                torch.nn.GELU(),
+                torch.nn.Dropout(drop2),
+                
+                # 第三层：512 -> 128
+                torch.nn.Linear(512, 128),
+                torch.nn.LayerNorm(128),
+                torch.nn.GELU(),
+                torch.nn.Dropout(drop3),
+                
+                # 输出层：128 -> 1
+                torch.nn.Linear(128, 1)
+            )
+        else:
+            print(f"在设备 {device} 上初始化简单 MLP 模型 (2层架构)...")
+            # 使用简单2层MLP
+            self.model = torch.nn.Sequential(
+                torch.nn.Linear(self.hidden_size, self.mlp_hidden_dim),
+                torch.nn.ReLU(),
+                torch.nn.Linear(self.mlp_hidden_dim, 1)
+            )
+            
+        self.model = self.model.to(device, dtype=self.torch_dtype)
+        
+        # 权重初始化
+        print("初始化模型权重 (Linear: Kaiming Normal, LayerNorm: Ones/Zeros)...")
+        for name, param in self.model.named_parameters():
+            if 'weight' in name and param.dim() > 1:
+                torch.nn.init.kaiming_normal_(param, mode='fan_in', nonlinearity='relu') # GELU 近似使用 relu 模式
+            elif 'bias' in name:
+                torch.nn.init.constant_(param, 0)
+            elif 'norm' in name and 'weight' in name: # LayerNorm weight
+                torch.nn.init.constant_(param, 1)
         
         self.n_samples = 0
         
@@ -2992,7 +3042,7 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             self.feature_rms = RunningMeanStd(shape=(self.hidden_size,), device=device)
 
         # --- 优化器与调度器 ---
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         
         # 初始化学习率调度器
         from verl.utils.torch_functional import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup

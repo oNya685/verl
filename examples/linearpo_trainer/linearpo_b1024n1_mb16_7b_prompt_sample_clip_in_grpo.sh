@@ -1,6 +1,6 @@
 set -x
-project_name='linearpo_prompt_last_math_prompt_sample'
-experiment_name='b1024n1_mb16_7b_norm_adv_filtered'
+project_name='linearpo_prompt_last_math_prompt_sample_grpo_based'
+experiment_name='b1024n1_mb16_7b_filtered'
 model_path=huggingface.co/Qwen/Qwen2.5-7B-Instruct
 train_files='[data/math/train.parquet]'
 test_files='[data/math/test.parquet]'
@@ -27,11 +27,11 @@ fi
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=spo \
-    actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
+    actor_rollout_ref.actor.policy_loss.loss_mode=grpo \
     reward_estimator.enable=True \
     reward_estimator.hidden_size=3584 \
-    reward_estimator.offload_to_cpu=True \
-    algorithm.norm_adv_by_std_in_grpo=True \
+    reward_estimator.offload_to_cpu=False \
+    algorithm.norm_adv_by_std_in_grpo=False \
     actor_rollout_ref.actor.output_hidden_states=True \
     actor_rollout_ref.actor.output_hidden_states_mode='prompt_last' \
     data.train_files=$train_files \
@@ -55,7 +55,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.grad_clip=1.0 \
-    actor_rollout_ref.actor.loss_agg_mode='seq-mean-token-mean' \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
