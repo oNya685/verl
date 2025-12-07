@@ -1,13 +1,22 @@
 set -x
 project_name='linearpo_prompt_last_math_prompt_sample'
-experiment_name='b1024n1_mb16_7b_norm_adv'
+experiment_name='b1024n1_mb16_7b_norm_adv_filtered'
 model_path=huggingface.co/Qwen/Qwen2.5-7B-Instruct
 train_files='[data/math/train.parquet]'
 test_files='[data/math/test.parquet]'
 
+# Weighted sampling configuration
 ENABLE_WEIGHTED_SAMPLING=true
 WEIGHT_UPDATE_INTERVAL=30
 WEIGHT_UPDATE_BATCH_SIZE=1024
+
+# Estimated reward filtering configuration
+# This will filter out samples with estimated_reward < 0.05 (too hard) or > 0.9 (too easy)
+# Only samples with 0.05 <= estimated_reward <= 0.9 will be used for actor updates
+# Critic and reward estimator will still use ALL samples
+ENABLE_FILTER=true
+FILTER_MIN=0.05
+FILTER_MAX=0.9
 
 mkdir -p "outputs/$project_name/$experiment_name"
 script_path="${BASH_SOURCE[0]}"
@@ -56,6 +65,10 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
+    algorithm.filter_groups.enable=$ENABLE_FILTER \
+    algorithm.filter_groups.metric=estimated_reward \
+    algorithm.filter_groups.estimated_reward_min=$FILTER_MIN \
+    algorithm.filter_groups.estimated_reward_max=$FILTER_MAX \
     trainer.critic_warmup=0 \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=$project_name \

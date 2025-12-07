@@ -47,13 +47,17 @@ class FilterGroupsConfig(BaseConfig):
 
     Args:
         enable (bool): Whether to enable filter groups.
-        metric (Optional[str]): Metric to use for filtering: "acc", "score", "seq_reward", "seq_final_reward", etc.
+        metric (Optional[str]): Metric to use for filtering: "acc", "score", "seq_reward", "seq_final_reward", "estimated_reward", etc.
         max_num_gen_batches (int): Non-positive values mean no upper limit.
+        estimated_reward_min (float): Minimum estimated reward threshold for filtering (for LinearPO).
+        estimated_reward_max (float): Maximum estimated reward threshold for filtering (for LinearPO).
     """
 
     enable: bool = False
     metric: Optional[str] = None
     max_num_gen_batches: int = 0
+    estimated_reward_min: float = 0.05  # LinearPO specific
+    estimated_reward_max: float = 0.9   # LinearPO specific
 
 
 @dataclass

@@ -246,6 +246,7 @@ def compute_advantage(
         adv_kwargs = {
             "token_level_rewards": data.batch["token_level_rewards"],
             "response_mask": data.batch["response_mask"],
+            "norm_adv_by_std_in_grpo": norm_adv_by_std_in_grpo,  # 必须传递这个参数！
             "config": config,
         }
         if "uid" in data.non_tensor_batch:  # optional
@@ -1311,19 +1312,54 @@ class RayPPOTrainer:
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
-                    # update reward estimator
+                    # update reward estimator (always use full batch)
                     if self.use_reward_estimator:
                         with marked_timer("update_estimator", timing_raw, color="purple"):
                             estimator_output = self.reward_estimator_wg.update_estimator(batch)
                         estimator_output_metrics = reduce_metrics(estimator_output.meta_info["metrics"])
                         metrics.update(estimator_output_metrics)
 
+                    # Filter batch for actor update based on estimated reward
+                    actor_batch = batch
+                    if (self.config.algorithm.filter_groups is not None and 
+                        self.config.algorithm.filter_groups.enable and
+                        self.config.algorithm.filter_groups.metric == "estimated_reward" and
+                        "estimated_rewards" in batch.batch):
+                        
+                        # Get estimated rewards (sequence level)
+                        estimated_rewards = batch.batch["estimated_rewards"]
+                        min_thresh = self.config.algorithm.filter_groups.estimated_reward_min
+                        max_thresh = self.config.algorithm.filter_groups.estimated_reward_max
+                        
+                        # Filter indices
+                        keep_mask = (estimated_rewards >= min_thresh) & (estimated_rewards <= max_thresh)
+                        keep_indices = torch.where(keep_mask)[0].tolist()
+                        
+                        # Log filtering statistics
+                        filter_metrics = {
+                            "filter/total_samples": len(estimated_rewards),
+                            "filter/kept_samples": len(keep_indices),
+                            "filter/filter_rate": 1.0 - len(keep_indices) / len(estimated_rewards),
+                            "filter/below_min": (estimated_rewards < min_thresh).sum().item(),
+                            "filter/above_max": (estimated_rewards > max_thresh).sum().item(),
+                        }
+                        metrics.update(filter_metrics)
+                        
+                        if len(keep_indices) > 0:
+                            # Create filtered batch for actor update
+                            actor_batch = batch[keep_indices]
+                            print(f"Filtered {len(estimated_rewards) - len(keep_indices)} samples "
+                                  f"({filter_metrics['filter/filter_rate']:.2%}) for actor update")
+                        else:
+                            print(f"Warning: All samples filtered out! Skipping actor update.")
+                            actor_batch = None
+
                     # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor
+                    if self.config.trainer.critic_warmup <= self.global_steps and actor_batch is not None:
+                        # update actor with filtered batch
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                            actor_batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                            actor_output = self.actor_rollout_wg.update_actor(actor_batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
