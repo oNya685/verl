@@ -27,7 +27,7 @@ fi
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=spo \
-    actor_rollout_ref.actor.policy_loss.loss_mode=grpo \
+    actor_rollout_ref.actor.policy_loss.loss_mode=vanilla \
     reward_estimator.enable=True \
     reward_estimator.hidden_size=3584 \
     reward_estimator.offload_to_cpu=False \
