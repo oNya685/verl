@@ -24,7 +24,6 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.scheduler.enable=false \
     actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -38,9 +37,6 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=8 \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=true \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
-    trainer.val_before_train=false \
     trainer.critic_warmup=0 \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=$project_name \
