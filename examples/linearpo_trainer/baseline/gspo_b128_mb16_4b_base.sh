@@ -19,7 +19,6 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.loss_agg_mode="seq-mean-token-mean" \
-    data.use_base=true\
     data.train_files=$train_files \
     data.val_files=$test_files \
     data.train_batch_size=128 \

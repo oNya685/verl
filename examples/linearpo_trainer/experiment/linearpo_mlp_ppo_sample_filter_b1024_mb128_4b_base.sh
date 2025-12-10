@@ -44,7 +44,6 @@ python3 -m verl.trainer.main_ppo \
     algorithm.filter_groups.metric=estimated_reward \
     algorithm.filter_groups.estimated_reward_min=$FILTER_MIN \
     algorithm.filter_groups.estimated_reward_max=$FILTER_MAX \
-    data.use_base=true \
     data.train_files=$train_files \
     data.val_files=$test_files \
     data.train_batch_size=1024 \
