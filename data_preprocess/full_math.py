@@ -25,7 +25,6 @@ print(project_dir)
 
 from verl.utils.hdfs_io import copy, makedirs
 import argparse
-from utils import log_dataset
 
 from verl.utils.reward_score.math_dataset import remove_boxed, last_boxed_only_string
 
@@ -37,41 +36,37 @@ def extract_solution(solution_str):
 if __name__ == '__main__':
     os.chdir('..')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--local_dir', default='./data/dapo')
+    parser.add_argument('--local_dir', default='./data/full_math')
     parser.add_argument('--hdfs_dir', default=None)
     parser.add_argument('--train_size', type=int, default=7500)
     parser.add_argument('--test_size', type=int, default=5000)
 
     args = parser.parse_args()
 
-    
-    data_source = "huggingface.co/datasets/open-r1/DAPO-Math-17k-Processed"
-    datasource_name = 'DAPO'
+    data_source = "xDAN2099/lighteval-MATH"
+    data_source_name = 'MATH'
     TRAIN_SIZE = args.train_size
     TEST_SIZE = args.test_size
 
-    dataset = datasets.load_dataset(data_source, 'all',trust_remote_code=True)["train"]
-    log_dataset(dataset)
+    dataset = datasets.load_dataset(data_source, trust_remote_code=True)
 
 
-    math_prompts = [x['prompt'][0]['content'] for x in datasets.load_dataset('parquet',data_files='./data/math/train.parquet')["train"]]
-    print(f"lenght of math prompts {len(math_prompts)}")
-    def filter_math_prompt(example):
-        return not (example['prompt'] in math_prompts)
-    print(f"length of dataset {len(dataset)} before filtering")
-    dataset = dataset.filter(filter_math_prompt)
-    print(f"length of dataset {len(dataset)} after filtering")
+    train_dataset = dataset['train'].select(range(TRAIN_SIZE))
+    test_dataset = dataset['test'].select(range(TEST_SIZE))
+
     # instruction_following = "Let's think step by step and output the final answer within \\boxed{}."
+
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
 
         def process_fn(example, idx):
-            question = example['prompt']
-            solution = example['solution']
+            question = example['problem']
+            answer = example['solution']
+            solution = extract_solution(answer)
 
             # Only keep necessary fields for training
             data = {
-                "data_source": datasource_name,
+                "data_source": data_source_name,
                 "prompt": [{
                     "role": "user",
                     "content": question
@@ -90,11 +85,18 @@ if __name__ == '__main__':
 
         return process_fn
 
+    train_dataset = train_dataset.map(function=make_map_fn('train'), with_indices=True, remove_columns=train_dataset.column_names)
+    test_dataset = test_dataset.map(function=make_map_fn('test'), with_indices=True, remove_columns=test_dataset.column_names)
+
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir
 
-    dataset = dataset.map(function=make_map_fn('train'), with_indices=True, remove_columns=dataset.column_names)
-    dataset.to_parquet(os.path.join(local_dir, 'train.parquet'))
+    train_dataset.to_parquet(os.path.join(local_dir, 'train.parquet'))
+    test_dataset.to_parquet(os.path.join(local_dir, 'test.parquet'))
+
+    # print data source and length
+    print(f"Data source: {data_source}")
+    print(f"Length of train dataset: {len(train_dataset)}")
 
     if hdfs_dir is not None:
         makedirs(hdfs_dir)

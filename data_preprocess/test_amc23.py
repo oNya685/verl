@@ -17,6 +17,7 @@ Preprocess the math dataset to parquet format
 
 import os
 import datasets
+import numpy as np
 import sys
 
 project_dir = os.path.dirname(os.path.abspath(os.path.join(__file__, "..")))
@@ -33,45 +34,38 @@ def extract_solution(solution_str):
     return remove_boxed(last_boxed_only_string(solution_str))
 
 
+def make_prefix(dp, template_type):
+    problem = dp['problem']
+
+    prefix = f"""Please solve the following math problem: {problem}. The assistant first thinks about the reasoning process step by step and then provides the user with the answer. Return the final answer in \\boxed{{}} tags, for example \\boxed{{1}}. Let's solve this step by step. """
+    return prefix
+
 if __name__ == '__main__':
     os.chdir('..')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--local_dir', default='./data/math')
+    parser.add_argument('--local_dir', default='./data/amc23')
     parser.add_argument('--hdfs_dir', default=None)
-    parser.add_argument('--train_size', type=int, default=7500)
-    parser.add_argument('--test_size', type=int, default=5000)
+    # parser.add_argument('--train_size', type=int, default=7500)
+    # parser.add_argument('--test_size', type=int, default=5000)
+    # parser.add_argument('--template_type', type=str, default='base')
 
     args = parser.parse_args()
 
-    data_source = "huggingface.co/datasets/xDAN2099/lighteval-MATH"
-    data_source_name = 'MATH'
-    TRAIN_SIZE = args.train_size
-    TEST_SIZE = args.test_size
+    data_source = 'math-ai/amc23'
+    data_source_name = 'AMC23'
 
     dataset = datasets.load_dataset(data_source, trust_remote_code=True)
 
-    # Filter by level >= 3
-    def filter_level(example):
-        try:
-            level_str = example['level']
-            level_num = int(level_str.split()[-1])
-            return level_num >=3
-        except:
-            print(level_str)
-            return True
-
-    train_dataset = dataset['train'].select(range(TRAIN_SIZE)).filter(filter_level)
-    test_dataset = dataset['test'].select(range(TEST_SIZE)).filter(filter_level)
-
-    # instruction_following = "Let's think step by step and output the final answer within \\boxed{}."
+    test_dataset = dataset['test']
+    print(test_dataset[0]['question'])
+    print(test_dataset[0]['answer'])
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
 
         def process_fn(example, idx):
-            question = example['problem']
-            answer = example['solution']
-            solution = extract_solution(answer)
+            question = example['question']
+            solution = example['answer']
 
             # Only keep necessary fields for training
             data = {
@@ -94,20 +88,17 @@ if __name__ == '__main__':
 
         return process_fn
 
-    train_dataset = train_dataset.map(function=make_map_fn('train'), with_indices=True, remove_columns=train_dataset.column_names)
-    test_dataset = test_dataset.map(function=make_map_fn('test'), with_indices=True, remove_columns=test_dataset.column_names)
+    test_dataset = test_dataset.map(function=make_map_fn('train'), with_indices=True, remove_columns=test_dataset.column_names)
+    repeat_test_dataset = test_dataset.repeat(16)
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir
 
-    train_dataset.to_parquet(os.path.join(local_dir, 'train.parquet'))
     test_dataset.to_parquet(os.path.join(local_dir, 'test.parquet'))
-
-    # print data source and length
-    print(f"Data source: {data_source}")
-    print(f"Length of train dataset: {len(train_dataset)}")
+    repeat_test_dataset.to_parquet(os.path.join(local_dir, 'test_16.parquet'))
+    # print length of processed data
+    print(f"Length of processed data: {len(test_dataset)}")
 
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
-
         copy(src=local_dir, dst=hdfs_dir)

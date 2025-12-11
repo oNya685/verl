@@ -35,7 +35,7 @@ def extract_solution(solution_str):
 
 
 def make_prefix(dp, template_type):
-    problem = dp['question']
+    problem = dp['problem']
 
     prefix = f"""Please solve the following math problem: {problem}. The assistant first thinks about the reasoning process step by step and then provides the user with the answer. Return the final answer in \\boxed{{}} tags, for example \\boxed{{1}}. Let's solve this step by step. """
     return prefix
@@ -43,14 +43,16 @@ def make_prefix(dp, template_type):
 if __name__ == '__main__':
     os.chdir('..')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--local_dir', default='./data/minerva')
+    parser.add_argument('--local_dir', default='./data/math500')
     parser.add_argument('--hdfs_dir', default=None)
+    # parser.add_argument('--train_size', type=int, default=7500)
+    # parser.add_argument('--test_size', type=int, default=5000)
     parser.add_argument('--template_type', type=str, default='base')
 
     args = parser.parse_args()
 
-    data_source = 'huggingface.co/datasets/math-ai/minervamath'
-    data_source_name = 'Minerva'
+    data_source = 'HuggingFaceH4/MATH-500'
+    data_source_name = 'MATH500'
 
     dataset = datasets.load_dataset(data_source, trust_remote_code=True)
 
@@ -60,7 +62,7 @@ if __name__ == '__main__':
     def make_map_fn(split):
 
         def process_fn(example, idx):
-            question = example['question']
+            question = example['problem']
             solution = example['answer']
 
             # Only keep necessary fields for training

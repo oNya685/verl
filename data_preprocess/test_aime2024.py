@@ -44,7 +44,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    data_source = 'huggingface.co/datasets/HuggingFaceH4/aime_2024'
+    data_source = 'HuggingFaceH4/aime_2024'
     data_source_name = 'AIME24'
 
     dataset = datasets.load_dataset(data_source, trust_remote_code=True)
