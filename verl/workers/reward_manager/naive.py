@@ -87,6 +87,7 @@ class NaiveRewardManager(AbstractRewardManager):
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
             score = self.compute_score(
+                prompt_str=prompt_str,
                 data_source=data_source,
                 solution_str=response_str,
                 ground_truth=ground_truth,
