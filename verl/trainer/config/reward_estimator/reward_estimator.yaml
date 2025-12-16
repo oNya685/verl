@@ -7,7 +7,10 @@
 enable: False
 
 use_analytical: false     # 使用神经网络模式
-hidden_size: 896          # 输入维度（原配置）
+model:
+  hidden_size: 3584  # 需要匹配actor的hidden size
+  fsdp_config:
+    model_dtype: fp32
 hidden_layer_size: 512    # 新增：隐藏层大小
 dropout_rate: 0.15        # 新增：Dropout率
 learning_rate: 1e-3       # 比通常稍大，加快追踪速度
