@@ -33,7 +33,7 @@ fi
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=spo \
     reward_estimator.enable=True \
-    reward_estimator.hidden_size=2560 \
+    reward_estimator.model.hidden_size=2560 \
     reward_estimator.offload_to_cpu=False \
     algorithm.norm_adv_by_std_in_grpo=True \
     data.enable_weighted_sampling=$ENABLE_WEIGHTED_SAMPLING \

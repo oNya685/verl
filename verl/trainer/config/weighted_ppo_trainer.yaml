@@ -75,7 +75,6 @@ reward_estimator:
   
   model:
     hidden_size: 3584  # 需要匹配actor的hidden size
-    mlp_hidden_dim: 512
     fsdp_config:
       model_dtype: fp32
   

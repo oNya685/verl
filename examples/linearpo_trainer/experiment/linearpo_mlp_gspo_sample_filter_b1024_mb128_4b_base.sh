@@ -35,7 +35,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.loss_agg_mode="seq-mean-token-mean" \
     reward_estimator.enable=True \
-    reward_estimator.hidden_size=2560 \
+    reward_estimator.model.hidden_size=2560 \
     reward_estimator.offload_to_cpu=False \
     algorithm.norm_adv_by_std_in_grpo=False \
     data.enable_weighted_sampling=$ENABLE_WEIGHTED_SAMPLING \
