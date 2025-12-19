@@ -1330,18 +1330,54 @@ class RayPPOTrainer:
                         min_thresh = self.config.algorithm.filter_groups.estimated_reward_min
                         max_thresh = self.config.algorithm.filter_groups.estimated_reward_max
                         
-                        # Filter indices
-                        keep_mask = (estimated_rewards >= min_thresh) & (estimated_rewards <= max_thresh)
-                        keep_indices = torch.where(keep_mask)[0].tolist()
+                        # Check if epistemic uncertainty is available for dynamic filtering
+                        # Requirements: 4.1, 4.2, 4.3, 4.4, 4.5 - Dynamic confidence-based filtering
+                        epistemic_uncertainty = batch.batch.get("epistemic_uncertainty", None)
+                        use_dynamic_filtering = self.config.reward_estimator.get("epistemic_uncertainty", {}).get("use_dynamic_filtering", False)
                         
-                        # Log filtering statistics
-                        filter_metrics = {
-                            "filter/total_samples": len(estimated_rewards),
-                            "filter/kept_samples": len(keep_indices),
-                            "filter/filter_rate": 1.0 - len(keep_indices) / len(estimated_rewards),
-                            "filter/below_min": (estimated_rewards < min_thresh).sum().item(),
-                            "filter/above_max": (estimated_rewards > max_thresh).sum().item(),
-                        }
+                        if use_dynamic_filtering and epistemic_uncertainty is not None:
+                            # Dynamic filtering using UCB/LCB confidence intervals
+                            # Requirements: 4.1 - Compute UCB = v̂ + U and LCB = v̂ - U
+                            ucb = estimated_rewards + epistemic_uncertainty
+                            lcb = estimated_rewards - epistemic_uncertainty
+                            
+                            # Clamp to valid probability range [0, 1]
+                            ucb = torch.clamp(ucb, 0.0, 1.0)
+                            lcb = torch.clamp(lcb, 0.0, 1.0)
+                            
+                            # Requirements: 4.2, 4.3, 4.4 - Keep if confidence interval overlaps with learning zone
+                            # Overlap condition: UCB > min_thresh AND LCB < max_thresh
+                            # This gives "benefit of the doubt" to uncertain predictions
+                            keep_mask = (ucb > min_thresh) & (lcb < max_thresh)
+                            
+                            # Log dynamic filtering statistics
+                            filter_metrics = {
+                                "filter/total_samples": len(estimated_rewards),
+                                "filter/kept_samples": keep_mask.sum().item(),
+                                "filter/filter_rate": 1.0 - keep_mask.sum().item() / len(estimated_rewards),
+                                "filter/below_min_static": (estimated_rewards < min_thresh).sum().item(),
+                                "filter/above_max_static": (estimated_rewards > max_thresh).sum().item(),
+                                "filter/mean_ucb": ucb.mean().item(),
+                                "filter/mean_lcb": lcb.mean().item(),
+                                "filter/mean_epistemic_uncertainty": epistemic_uncertainty.mean().item(),
+                                # Count samples saved by dynamic filtering (would be filtered by static but kept by dynamic)
+                                "filter/saved_by_dynamic": ((ucb > min_thresh) & (lcb < max_thresh) & 
+                                                           ~((estimated_rewards >= min_thresh) & (estimated_rewards <= max_thresh))).sum().item(),
+                            }
+                        else:
+                            # Requirements: 4.5 - Fall back to static filtering when epistemic uncertainty disabled
+                            keep_mask = (estimated_rewards >= min_thresh) & (estimated_rewards <= max_thresh)
+                            
+                            # Log static filtering statistics
+                            filter_metrics = {
+                                "filter/total_samples": len(estimated_rewards),
+                                "filter/kept_samples": keep_mask.sum().item(),
+                                "filter/filter_rate": 1.0 - keep_mask.sum().item() / len(estimated_rewards),
+                                "filter/below_min": (estimated_rewards < min_thresh).sum().item(),
+                                "filter/above_max": (estimated_rewards > max_thresh).sum().item(),
+                            }
+                        
+                        keep_indices = torch.where(keep_mask)[0].tolist()
                         metrics.update(filter_metrics)
                         
                         if len(keep_indices) > 0:

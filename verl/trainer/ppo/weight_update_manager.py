@@ -382,9 +382,15 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                 
                 v_values = reward_output.batch["estimated_rewards"]
                 
+                # Extract epistemic uncertainty if available (from epistemic uncertainty feature)
+                # Requirements: 8.3 - Incorporate epistemic uncertainty when enabled
+                epistemic_uncertainty = reward_output.batch.get("epistemic_uncertainty", None)
+                
                 # 如果有padding，只保留原始样本的结果
                 if batch_size < padded_batch_size:
                     v_values = v_values[:batch_size]
+                    if epistemic_uncertainty is not None:
+                        epistemic_uncertainty = epistemic_uncertainty[:batch_size]
                     dataset_indices = original_indices
                 
                 # 收集结果
@@ -395,6 +401,14 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                 
                 all_indices.extend(dataset_indices_list)
                 all_v_values.extend(v_values.cpu().numpy().tolist() if isinstance(v_values, torch.Tensor) else v_values)
+                
+                # Collect epistemic uncertainty values if available
+                if epistemic_uncertainty is not None:
+                    if not hasattr(self, '_all_epistemic_uncertainty'):
+                        self._all_epistemic_uncertainty = []
+                    self._all_epistemic_uncertainty.extend(
+                        epistemic_uncertainty.cpu().numpy().tolist() if isinstance(epistemic_uncertainty, torch.Tensor) else epistemic_uncertainty
+                    )
                 
             except Exception as e:
                 logger.error(f"Error processing batch {batch_idx}: {e}")
@@ -407,7 +421,20 @@ class SyncWeightUpdateManager(WeightUpdateManager):
             # 确保indices是int类型的numpy array
             indices_array = np.array(all_indices, dtype=np.int64)
             v_values_array = np.array(all_v_values, dtype=np.float32)
-            self.dataset.update_weights_from_v(indices_array, v_values_array)
+            
+            # Pass epistemic uncertainty if available
+            # Requirements: 3.1, 3.3, 8.3 - Incorporate epistemic uncertainty in sampling weights
+            epistemic_uncertainty_array = None
+            if hasattr(self, '_all_epistemic_uncertainty') and self._all_epistemic_uncertainty:
+                epistemic_uncertainty_array = np.array(self._all_epistemic_uncertainty, dtype=np.float32)
+                # Clear for next update
+                self._all_epistemic_uncertainty = []
+            
+            self.dataset.update_weights_from_v(
+                indices_array, 
+                v_values_array,
+                epistemic_uncertainty=epistemic_uncertainty_array
+            )
             
             stats = self.dataset.get_weight_stats()
             logger.info(f"Weight update #{self.update_count + 1} completed. Stats: {stats}")

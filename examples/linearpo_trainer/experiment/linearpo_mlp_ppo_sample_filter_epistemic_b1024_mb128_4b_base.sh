@@ -1,12 +1,12 @@
 set -x
-project_name='linearpo_mlp_ppo_sample_filter_norm_adv'
+project_name='linearpo_mlp_ppo_sample_filter_epistemic'
 experiment_name='b1024_mb128_4b'
-model_path=/root/autodl-tmp//Qwen/Qwen2.5-7B-Instruct
+model_path=huggingface.co/Qwen/Qwen3-4B-Base
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
 test_files='[data/aime25/test_16.parquet,data/aime24/test_16.parquet,data/amc23/test_16.parquet,data/math500/test.parquet,data/minerva/test.parquet,data/olympiad/test.parquet]'
 
 ENABLE_WEIGHTED_SAMPLING=true
-WEIGHT_UPDATE_INTERVAL=2
+WEIGHT_UPDATE_INTERVAL=30
 WEIGHT_UPDATE_BATCH_SIZE=1024
 
 BETA_EXPLORATION=1.0
@@ -19,8 +19,6 @@ USE_DYNAMIC_FILTERING=true
 FILTER_MIN=0.1
 FILTER_MAX=0.9
 
-OFFLOAD_TO_CPU=true
-
 mkdir -p "outputs/$project_name/$experiment_name"
 script_path="${BASH_SOURCE[0]}"
 if [ -f "$script_path" ]; then
@@ -31,13 +29,13 @@ fi
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=spo \
     reward_estimator.enable=True \
-    reward_estimator.hidden_size=3584 \
-    reward_estimator.offload_to_cpu=$OFFLOAD_TO_CPU \
+    reward_estimator.model.hidden_size=2560 \
+    reward_estimator.offload_to_cpu=False \
     reward_estimator.epistemic_uncertainty.enable=$ENABLE_EPISTEMIC \
     reward_estimator.epistemic_uncertainty.lambda_reg=$LAMBDA_REG \
     reward_estimator.epistemic_uncertainty.alpha_scale=$ALPHA_SCALE \
     reward_estimator.epistemic_uncertainty.use_dynamic_filtering=$USE_DYNAMIC_FILTERING \
-    algorithm.norm_adv_by_std_in_grpo=True \
+    algorithm.norm_adv_by_std_in_grpo=False \
     data.enable_weighted_sampling=$ENABLE_WEIGHTED_SAMPLING \
     data.weight_update_interval=$WEIGHT_UPDATE_INTERVAL \
     data.weight_update_batch_size=$WEIGHT_UPDATE_BATCH_SIZE \
@@ -51,30 +49,29 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.output_hidden_states_mode='prompt_last' \
     data.train_files=$train_files \
     data.val_files=$test_files \
-    data.train_batch_size=16 \
-    data.max_prompt_length=512 \
-    data.max_response_length=1024 \
+    data.train_batch_size=1024 \
+    data.max_prompt_length=2048 \
+    data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=$OFFLOAD_TO_CPU \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=$OFFLOAD_TO_CPU \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.fsdp_config.param_offload=False \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=1 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=$OFFLOAD_TO_CPU \
     trainer.critic_warmup=0 \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=$project_name \
     trainer.experiment_name=$experiment_name \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=151 \
     trainer.test_freq=20 \

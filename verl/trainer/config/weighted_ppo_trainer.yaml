@@ -34,6 +34,11 @@ data:
   use_dynamic_sampler: true  # 使用动态采样器
   num_batches_per_epoch: 1000  # 每个epoch的批次数
   
+  # Epistemic uncertainty for sampling weights
+  # Weight formula: w(x) = sqrt(v̂(1-v̂)) + β·U(x) + ε
+  # When beta_exploration=0, uses aleatoric-only formula (backward compatible)
+  beta_exploration: 0.5  # Coefficient for epistemic uncertainty term
+  
   # 缓存配置
   cache_dir: ~/.cache/verl/weighted_rlhf
   use_shm: false

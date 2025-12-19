@@ -129,3 +129,5 @@ outputs
 
 tensorboard_log/
 !data/**/*
+
+.kiro/

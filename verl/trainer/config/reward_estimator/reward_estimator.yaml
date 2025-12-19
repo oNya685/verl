@@ -18,6 +18,26 @@ gradient_clip_norm: 1.0   # 根据噪声强度调整（0.5-2.0）
 weight_decay: 1e-4        # 防止记忆噪声模式
 lambda_reg: 0.001
 
+# Epistemic Uncertainty Configuration
+# Enables Neural-Linear Bandits-inspired uncertainty quantification for more intelligent curriculum learning.
+# When enabled, the system tracks epistemic uncertainty using an inverse covariance matrix,
+# allowing distinction between prompts that are genuinely easy vs. unfamiliar to the value estimator.
+epistemic_uncertainty:
+  # Enable epistemic uncertainty tracking
+  enable: False
+  
+  # Regularization coefficient for covariance initialization (P = (1/lambda_reg) * I)
+  # Higher values lead to smaller initial uncertainty estimates
+  lambda_reg: 1.0
+  
+  # Scaling factor for the uncertainty term in U(x) = alpha_scale * sqrt(φᵀPφ / d)
+  # Controls the magnitude of epistemic uncertainty contribution
+  alpha_scale: 0.5
+  
+  # Use dynamic confidence-based filtering (UCB/LCB) instead of static thresholds
+  # When enabled, samples are retained if their confidence interval overlaps with the learning zone
+  use_dynamic_filtering: False
+
 offload_to_cpu: False
 
 # Whether to deploy the model to a separate resource pool.

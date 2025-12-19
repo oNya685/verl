@@ -2858,6 +2858,10 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
     """
     奖励估计器 Worker (MLP版)
     使用 MLP + BCELoss 来预测 Baseline (0-1概率)，增加了手动CPU Offload功能以节省显存。
+    
+    Supports optional epistemic uncertainty tracking using Neural-Linear Bandits approach.
+    When enabled, the MLP is split into feature_extractor (layers 1-3) and output_layer
+    to extract penultimate features for uncertainty computation.
     """
     def __init__(self, config: FSDPCriticConfig):
         # -- 基础初始化 --
@@ -2898,7 +2902,19 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         # -- Offload 配置 --
         self.offload_to_cpu = self.config.get("offload_to_cpu", True)
         
+        # -- Epistemic Uncertainty 配置 --
+        # Requirements: 8.1 - When epistemic uncertainty is disabled, produce identical behavior
+        epistemic_config = self.config.get("epistemic_uncertainty", {})
+        self.enable_epistemic_uncertainty = epistemic_config.get("enable", False)
+        self.epistemic_lambda_reg = epistemic_config.get("lambda_reg", 1.0)
+        self.epistemic_alpha_scale = epistemic_config.get("alpha_scale", 0.5)
+        
+        # Epistemic tracker will be initialized in init_model() if enabled
+        self.epistemic_tracker = None
+        
         self.log_adapter.info(f"Worker 初始化完成 (MLP模式)。CPU Offload: {self.offload_to_cpu}, LR: {self.learning_rate}, WD: {self.weight_decay}")
+        if self.enable_epistemic_uncertainty:
+            self.log_adapter.info(f"Epistemic Uncertainty 已启用: lambda_reg={self.epistemic_lambda_reg}, alpha_scale={self.epistemic_alpha_scale}")
         
     def _init_profiler(self, config: FSDPCriticConfig):
         omega_profiler_config = config.get("profiler", {})
@@ -2946,7 +2962,13 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         device = get_device_id()
         # self.log_adapter.debug("Loading RewardEstimator to GPU...")
         self.model.to(device)
+        self.feature_extractor.to(device)
+        self.output_layer.to(device)
         if self.normalize_features: self.feature_rms.to(device)
+        
+        # Load epistemic tracker to GPU if enabled
+        if self.epistemic_tracker is not None:
+            self.epistemic_tracker.to(torch.device(device) if isinstance(device, int) else device)
         
         # 优化器状态需要特殊处理
         if hasattr(self, 'optimizer') and self.optimizer is not None:
@@ -2963,7 +2985,13 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             
         # self.log_adapter.debug("Offloading RewardEstimator to CPU...")
         self.model.to('cpu')
+        self.feature_extractor.to('cpu')
+        self.output_layer.to('cpu')
         if self.normalize_features: self.feature_rms.to('cpu')
+        
+        # Offload epistemic tracker if enabled
+        if self.epistemic_tracker is not None:
+            self.epistemic_tracker.to(torch.device('cpu'))
         
         # 优化器状态也需要移到CPU
         if hasattr(self, 'optimizer') and self.optimizer is not None:
@@ -2975,9 +3003,39 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         aggressive_empty_cache() 
         # self.log_adapter.debug("RewardEstimator offloaded to CPU.")
 
+    def _extract_penultimate_features(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Extract 128-dimensional penultimate layer features from the MLP.
+        
+        This method passes the input through the feature_extractor (layers 1-3)
+        to obtain the penultimate features before the final linear projection.
+        
+        Args:
+            hidden_states: Input tensor of shape (batch_size, hidden_size)
+                          Already normalized if normalize_features is enabled.
+        
+        Returns:
+            Tensor of shape (batch_size, penultimate_dim) containing the
+            penultimate layer features (128-dim for deep MLP).
+        
+        Requirements: 2.1 - Extract 128-dimensional penultimate layer features
+        """
+        # Pass through feature extractor (layers 1-3)
+        # The feature_extractor outputs 128-dim features after LayerNorm + GELU + Dropout
+        penultimate_features = self.feature_extractor(hidden_states)
+        return penultimate_features
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        """初始化 MLP 模型和 SGD 优化器。"""
+        """
+        初始化 MLP 模型和 SGD 优化器。
+        
+        When epistemic uncertainty is enabled, the MLP is split into:
+        - feature_extractor: Layers 1-3 (produces 128-dim penultimate features)
+        - output_layer: Final linear layer (128 -> 1)
+        
+        Requirements: 2.1, 8.1
+        """
         device = 'cpu' if self.offload_to_cpu else get_device_id()
         
         if self.use_deep_mlp:
@@ -2992,8 +3050,10 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                 drop1, drop2, drop3 = self.dropout_rate[0], self.dropout_rate[1], self.dropout_rate[2]
             else:
                 drop1, drop2, drop3 = 0.4, 0.3, 0.2
-                
-            self.model = torch.nn.Sequential(
+            
+            # Split MLP into feature_extractor and output_layer for epistemic uncertainty
+            # Requirements: 2.1 - Extract 128-dimensional penultimate layer features
+            self.feature_extractor = torch.nn.Sequential(
                 # 第一层：3584 -> 1024
                 torch.nn.Linear(self.hidden_size, 1024),
                 torch.nn.LayerNorm(1024),
@@ -3006,25 +3066,44 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                 torch.nn.GELU(),
                 torch.nn.Dropout(drop2),
                 
-                # 第三层：512 -> 128
+                # 第三层：512 -> 128 (penultimate layer)
                 torch.nn.Linear(512, 128),
                 torch.nn.LayerNorm(128),
                 torch.nn.GELU(),
                 torch.nn.Dropout(drop3),
-                
-                # 输出层：128 -> 1
-                torch.nn.Linear(128, 1)
-            )
-        else:
-            print(f"在设备 {device} 上初始化简单 MLP 模型 (2层架构)...")
-            # 使用简单2层MLP
-            self.model = torch.nn.Sequential(
-                torch.nn.Linear(self.hidden_size, self.mlp_hidden_dim),
-                torch.nn.ReLU(),
-                torch.nn.Linear(self.mlp_hidden_dim, 1)
             )
             
+            # 输出层：128 -> 1
+            self.output_layer = torch.nn.Linear(128, 1)
+            
+            # Create combined model for backward compatibility
+            self.model = torch.nn.Sequential(
+                self.feature_extractor,
+                self.output_layer
+            )
+            
+            # Penultimate feature dimension for epistemic tracker
+            self._penultimate_dim = 128
+        else:
+            print(f"在设备 {device} 上初始化简单 MLP 模型 (2层架构)...")
+            # 使用简单2层MLP - also split for consistency
+            self.feature_extractor = torch.nn.Sequential(
+                torch.nn.Linear(self.hidden_size, self.mlp_hidden_dim),
+                torch.nn.ReLU(),
+            )
+            self.output_layer = torch.nn.Linear(self.mlp_hidden_dim, 1)
+            
+            self.model = torch.nn.Sequential(
+                self.feature_extractor,
+                self.output_layer
+            )
+            
+            # Penultimate feature dimension for epistemic tracker
+            self._penultimate_dim = self.mlp_hidden_dim
+            
         self.model = self.model.to(device, dtype=self.torch_dtype)
+        self.feature_extractor = self.feature_extractor.to(device, dtype=self.torch_dtype)
+        self.output_layer = self.output_layer.to(device, dtype=self.torch_dtype)
         
         # 权重初始化
         print("初始化模型权重 (Linear: Kaiming Normal, LayerNorm: Ones/Zeros)...")
@@ -3040,6 +3119,24 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         
         if self.normalize_features:
             self.feature_rms = RunningMeanStd(shape=(self.hidden_size,), device=device)
+
+        # --- Initialize Epistemic Uncertainty Tracker if enabled ---
+        # Requirements: 8.1 - When disabled, produce identical behavior to original implementation
+        if self.enable_epistemic_uncertainty:
+            from verl.workers.reward_estimator.epistemic_tracker import EpistemicUncertaintyTracker
+            
+            print(f"初始化 EpistemicUncertaintyTracker: feature_dim={self._penultimate_dim}, "
+                  f"lambda_reg={self.epistemic_lambda_reg}, alpha_scale={self.epistemic_alpha_scale}")
+            
+            self.epistemic_tracker = EpistemicUncertaintyTracker(
+                feature_dim=self._penultimate_dim,
+                lambda_reg=self.epistemic_lambda_reg,
+                alpha_scale=self.epistemic_alpha_scale,
+                device=torch.device(device) if isinstance(device, str) else device,
+                dtype=torch.float32  # Use float32 for numerical stability in covariance computations
+            )
+        else:
+            self.epistemic_tracker = None
 
         # --- 优化器与调度器 ---
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
@@ -3068,13 +3165,22 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             )
 
         print(f"MLP + AdamW 已初始化。")
+        if self.enable_epistemic_uncertainty:
+            print(f"Epistemic Uncertainty Tracker 已初始化。")
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward_estimator"))
     def compute_estimated_reward(self, data: DataProto) -> DataProto:
         """
-        推理阶段：计算 Baseline。
+        推理阶段：计算 Baseline 和可选的 epistemic uncertainty。
+        
         输入：Hidden States
-        输出：Sigmoid(Logits) -> (0, 1) 概率值
+        输出：
+            - estimated_rewards: Sigmoid(Logits) -> (0, 1) 概率值
+            - epistemic_uncertainty: U(x) 值 (如果启用)
+            - ucb: Upper Confidence Bound = v̂ + U (如果启用)
+            - lcb: Lower Confidence Bound = v̂ - U (如果启用)
+        
+        Requirements: 2.2, 2.3, 4.1, 6.5, 8.2
         """
         try:
             self._load_to_gpu()
@@ -3083,21 +3189,55 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             hidden_states = data.batch["hidden_states"].to(self.torch_dtype)
             
             self.model.eval()
+            self.feature_extractor.eval()
+            self.output_layer.eval()
+            
             with torch.no_grad():
                 # 特征归一化
                 if self.normalize_features:
-                    hidden_states = (hidden_states - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
+                    norm_hidden_states = (hidden_states - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
+                else:
+                    norm_hidden_states = hidden_states
 
-                # MLP 前向传播得到 Logits
-                logits = self.model(hidden_states).squeeze(-1)
+                # Extract penultimate features using feature_extractor
+                # Requirements: 2.1 - Extract 128-dimensional penultimate layer features
+                penultimate_features = self._extract_penultimate_features(norm_hidden_states)
+                
+                # Get logits from output layer
+                logits = self.output_layer(penultimate_features).squeeze(-1)
                 
                 # 推理时手动加 Sigmoid，限制输出在 (0, 1)
                 # Predicted Probability of Correctness
                 estimated_rewards = torch.sigmoid(logits)
+                
+                # Build output tensors dict
+                output_tensors = {"estimated_rewards": estimated_rewards.cpu()}
+                
+                # Compute epistemic uncertainty if enabled
+                # Requirements: 2.2, 2.3, 8.2
+                if self.enable_epistemic_uncertainty and self.epistemic_tracker is not None:
+                    # Compute epistemic uncertainty U(x)
+                    # Requirements: 2.2 - U(x) = α_scale * sqrt(φᵀPφ / d)
+                    epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(penultimate_features)
+                    
+                    # Compute UCB and LCB
+                    # Requirements: 4.1 - LCB = v̂ - U, UCB = v̂ + U
+                    ucb = estimated_rewards + epistemic_uncertainty
+                    lcb = estimated_rewards - epistemic_uncertainty
+                    
+                    # Clamp UCB/LCB to valid probability range [0, 1]
+                    ucb = torch.clamp(ucb, 0.0, 1.0)
+                    lcb = torch.clamp(lcb, 0.0, 1.0)
+                    
+                    # Add to output
+                    # Requirements: 6.5, 8.2 - Return epistemic uncertainty in output DataProto
+                    output_tensors["epistemic_uncertainty"] = epistemic_uncertainty.cpu()
+                    output_tensors["ucb"] = ucb.cpu()
+                    output_tensors["lcb"] = lcb.cpu()
 
             # Keep on CPU for consistency with other workers
             # The trainer will handle device placement as needed
-            output = DataProto.from_dict(tensors={"estimated_rewards": estimated_rewards.cpu()})
+            output = DataProto.from_dict(tensors=output_tensors)
             return output
         finally:
             self._offload_to_cpu()
@@ -3105,7 +3245,9 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward_estimator"))
     def update_estimator(self, data: DataProto) -> DataProto:
         """
-        训练阶段：使用 BCE Loss 更新 MLP。
+        训练阶段：使用 BCE Loss 更新 MLP，并更新 epistemic uncertainty tracker。
+        
+        Requirements: 1.2, 1.3, 6.1, 6.2, 6.3, 6.4
         """
         try:
             self._load_to_gpu()
@@ -3127,9 +3269,12 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             
             # --- 训练更新 (MLP + BCE) ---
             self.model.train()
+            self.feature_extractor.train()
+            self.output_layer.train()
             
-            # 获取 Logits
-            logits = self.model(norm_hidden_states).squeeze(-1)
+            # Extract penultimate features and get logits
+            penultimate_features = self._extract_penultimate_features(norm_hidden_states)
+            logits = self.output_layer(penultimate_features).squeeze(-1)
             
             # 计算 BCE With Logits Loss
             loss_fn = torch.nn.BCEWithLogitsLoss()
@@ -3188,6 +3333,48 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                 
                 metrics["reward_estimator/mse_vs_group_mean"] = mse_vs_group.item()
                 metrics["reward_estimator/mean_group_reward"] = group_means.mean().item()
+                
+                # --- Update Epistemic Uncertainty Tracker ---
+                # Requirements: 1.2, 1.3 - Update inverse covariance matrix with detached features
+                if self.enable_epistemic_uncertainty and self.epistemic_tracker is not None:
+                    # Extract penultimate features again (detached for covariance update)
+                    # Note: penultimate_features from training may have gradients, so we re-extract
+                    with torch.no_grad():
+                        detached_features = self._extract_penultimate_features(norm_hidden_states)
+                    
+                    # Update the inverse covariance matrix using Sherman-Morrison
+                    # Requirements: 1.2 - Update using Sherman-Morrison formula
+                    self.epistemic_tracker.update(detached_features)
+                    
+                    # Compute epistemic uncertainty metrics
+                    # Requirements: 6.1, 6.2, 6.3, 6.4
+                    epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(detached_features)
+                    
+                    # Compute UCB and LCB
+                    ucb = pred_probs + epistemic_uncertainty
+                    lcb = pred_probs - epistemic_uncertainty
+                    
+                    # Clamp to valid range
+                    ucb = torch.clamp(ucb, 0.0, 1.0)
+                    lcb = torch.clamp(lcb, 0.0, 1.0)
+                    
+                    # Log epistemic uncertainty metrics
+                    # Requirements: 6.1 - Log mean epistemic uncertainty
+                    metrics["reward_estimator/epistemic/mean_uncertainty"] = epistemic_uncertainty.mean().item()
+                    metrics["reward_estimator/epistemic/std_uncertainty"] = epistemic_uncertainty.std().item()
+                    metrics["reward_estimator/epistemic/min_uncertainty"] = epistemic_uncertainty.min().item()
+                    metrics["reward_estimator/epistemic/max_uncertainty"] = epistemic_uncertainty.max().item()
+                    
+                    # Requirements: 6.2 - Log mean UCB and LCB
+                    metrics["reward_estimator/epistemic/mean_ucb"] = ucb.mean().item()
+                    metrics["reward_estimator/epistemic/mean_lcb"] = lcb.mean().item()
+                    
+                    # Requirements: 6.4 - Log condition number for numerical stability monitoring
+                    condition_number = self.epistemic_tracker.get_condition_number()
+                    metrics["reward_estimator/epistemic/condition_number"] = condition_number
+                    
+                    # Log number of covariance updates
+                    metrics["reward_estimator/epistemic/n_updates"] = self.epistemic_tracker.n_updates
 
             self.n_samples += norm_hidden_states.shape[0]
             metrics["reward_estimator/n_samples"] = self.n_samples
@@ -3199,22 +3386,38 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, path):
+        """
+        Save checkpoint including epistemic tracker state if enabled.
+        
+        Requirements: 1.5, 8.4 - Include epistemic tracker state in checkpoint
+        """
         print(f"正在保存检查点到 {path}...")
         self._offload_to_cpu()
         
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'lr_scheduler_state_dict': self.lr_scheduler.state_dict(), # 保存调度器
+            'lr_scheduler_state_dict': self.lr_scheduler.state_dict(),
             'torch_dtype': self.torch_dtype,
             'feature_rms_state_dict': self.feature_rms.state_dict() if self.normalize_features else None,
         }
+        
+        # Requirements: 1.5, 8.4 - Include epistemic tracker state in checkpoint
+        if self.enable_epistemic_uncertainty and self.epistemic_tracker is not None:
+            checkpoint['epistemic_tracker_state_dict'] = self.epistemic_tracker.state_dict()
+            print(f"Epistemic tracker state included (n_updates={self.epistemic_tracker.n_updates})")
         
         torch.save(checkpoint, path)
         print("检查点保存成功。")
         
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, path):
+        """
+        Load checkpoint including epistemic tracker state if present.
+        
+        Requirements: 1.5, 8.4 - Load epistemic tracker state from checkpoint
+        Handles backward compatibility for checkpoints without epistemic state.
+        """
         if not path or not os.path.exists(path):
             self.log_adapter.warning(f"检查点路径 '{path}' 无效或不存在。")
             return
@@ -3230,6 +3433,15 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         
         if self.normalize_features and checkpoint.get('feature_rms_state_dict'):
             self.feature_rms.load_state_dict(checkpoint['feature_rms_state_dict'])
+        
+        # Requirements: 1.5, 8.4 - Load epistemic tracker state if present
+        # Handle backward compatibility for checkpoints without epistemic state
+        if self.enable_epistemic_uncertainty and self.epistemic_tracker is not None:
+            if 'epistemic_tracker_state_dict' in checkpoint:
+                self.epistemic_tracker.load_state_dict(checkpoint['epistemic_tracker_state_dict'])
+                print(f"Epistemic tracker state loaded (n_updates={self.epistemic_tracker.n_updates})")
+            else:
+                print("Warning: Checkpoint does not contain epistemic tracker state. Using fresh initialization.")
         
         if self.offload_to_cpu:
             self._offload_to_cpu()

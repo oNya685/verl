@@ -12,3 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from verl.workers.reward_estimator.epistemic_tracker import EpistemicUncertaintyTracker
+
+__all__ = ['EpistemicUncertaintyTracker']
