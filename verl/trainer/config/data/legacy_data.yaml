@@ -146,6 +146,8 @@ initial_v: 0.5
 # Minimum weight to prevent samples from never being sampled
 min_weight: 0.01
 
+beta_exploration: 0.5
+
 # Whether to use dynamic weighted sampler
 use_dynamic_weighted_sampler: False
 
