@@ -1,27 +1,23 @@
-# Tested successfully on the hiyouga/verl:ngc-th2.6.0-cu126-vllm0.8.4-flashinfer0.2.2-cxx11abi0 image.
-# It outperforms the Qwen2 7B base model by two percentage points on the test set of GSM8K.
-
 set -x
-project_name='linearpo_mlp_ppo_sample_filter'
+project_name='linearpo_mlp_ppo_sample_filter_epistemic'
 experiment_name='b1024_mb128_4b'
 model_path=huggingface.co/Qwen/Qwen3-4B-Base
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
 test_files='[data/aime25/test_16.parquet,data/aime24/test_16.parquet,data/amc23/test_16.parquet,data/math500/test.parquet,data/minerva/test.parquet,data/olympiad/test.parquet]'
 
-
-# Weighted sampling configuration
 ENABLE_WEIGHTED_SAMPLING=true
 WEIGHT_UPDATE_INTERVAL=30
 WEIGHT_UPDATE_BATCH_SIZE=1024
 
-# Estimated reward filtering configuration
-# This will filter out samples with estimated_reward < 0.05 (too hard) or > 0.9 (too easy)
-# Only samples with 0.05 <= estimated_reward <= 0.9 will be used for actor updates
-# Critic and reward estimator will still use ALL samples
+BETA_EXPLORATION=1.0
+ENABLE_EPISTEMIC=true
+LAMBDA_REG=1.0
+ALPHA_SCALE=0.5
+
 ENABLE_FILTER=true
+USE_DYNAMIC_FILTERING=true
 FILTER_MIN=0.1
 FILTER_MAX=0.9
-
 
 mkdir -p "outputs/$project_name/$experiment_name"
 script_path="${BASH_SOURCE[0]}"
@@ -37,10 +33,15 @@ python3 -m verl.trainer.main_ppo \
     reward_estimator.enable=True \
     reward_estimator.model.hidden_size=2560 \
     reward_estimator.offload_to_cpu=False \
-    algorithm.norm_adv_by_std_in_grpo=False \
+    reward_estimator.epistemic_uncertainty.enable=$ENABLE_EPISTEMIC \
+    reward_estimator.epistemic_uncertainty.lambda_reg=$LAMBDA_REG \
+    reward_estimator.epistemic_uncertainty.alpha_scale=$ALPHA_SCALE \
+    reward_estimator.epistemic_uncertainty.use_dynamic_filtering=$USE_DYNAMIC_FILTERING \
+    algorithm.norm_adv_by_std_in_grpo=True \
     data.enable_weighted_sampling=$ENABLE_WEIGHTED_SAMPLING \
     data.weight_update_interval=$WEIGHT_UPDATE_INTERVAL \
     data.weight_update_batch_size=$WEIGHT_UPDATE_BATCH_SIZE \
+    data.beta_exploration=$BETA_EXPLORATION \
     algorithm.use_kl_in_reward=False \
     algorithm.filter_groups.enable=$ENABLE_FILTER \
     algorithm.filter_groups.metric=estimated_reward \
