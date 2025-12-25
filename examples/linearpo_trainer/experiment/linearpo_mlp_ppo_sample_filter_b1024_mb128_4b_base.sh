@@ -19,7 +19,7 @@ WEIGHT_UPDATE_BATCH_SIZE=1024
 # Only samples with 0.05 <= estimated_reward <= 0.9 will be used for actor updates
 # Critic and reward estimator will still use ALL samples
 ENABLE_FILTER=true
-FILTER_MIN=0.05
+FILTER_MIN=0.1
 FILTER_MAX=0.9
 
 

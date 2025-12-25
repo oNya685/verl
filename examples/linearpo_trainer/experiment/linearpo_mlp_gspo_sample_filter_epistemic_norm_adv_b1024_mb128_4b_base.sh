@@ -1,5 +1,5 @@
 set -x
-project_name='linearpo_mlp_ppo_sample_filter_epistemic'
+project_name='linearpo_mlp_gspo_sample_filter_epistemic_norm_adv'
 experiment_name='b1024_mb128_4b'
 model_path=huggingface.co/Qwen/Qwen3-4B-Base
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
@@ -30,6 +30,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=spo \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.loss_agg_mode="seq-mean-token-mean" \
+    actor_rollout_ref.actor.clip_ratio_low=0.0003 \
+    actor_rollout_ref.actor.clip_ratio_high=0.0004 \
     reward_estimator.enable=True \
     reward_estimator.model.hidden_size=2560 \
     reward_estimator.offload_to_cpu=False \

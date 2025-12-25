@@ -1,5 +1,5 @@
 set -x
-project_name='linearpo_mlp_ppo_sample_filter_epistemic'
+project_name='linearpo_mlp_ppo_sample_filter_epistemic_norm_adv'
 experiment_name='b1024_mb128_4b'
 model_path=huggingface.co/Qwen/Qwen3-4B-Base
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
