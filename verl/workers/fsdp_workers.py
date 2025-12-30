@@ -2482,37 +2482,37 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                 
                 # Build output tensors dict
                 # full_response模式下存到'values'以兼容critic的接口
-                # 标准模式下存到'estimated_rewards'
                 if is_full_response:
                     output_tensors = {"values": estimated_rewards.cpu()}
+                    # 对于 sequence-level 的 estimated_rewards（用于 filtering 和 weighted sampling），
+                    # 取 prompt_last 位置（即 [:, 0]），因为这个位置包含了整个 prompt 的信息
+                    output_tensors["estimated_rewards"] = estimated_rewards[:, 0].cpu()
                 else:
                     output_tensors = {"estimated_rewards": estimated_rewards.cpu()}
                 
                 # Compute epistemic uncertainty if enabled
                 # Requirements: 2.2, 2.3, 8.2
                 if self.enable_epistemic_uncertainty and self.epistemic_tracker is not None:
-                    # Compute epistemic uncertainty U(x)
-                    # Requirements: 2.2 - U(x) = α_scale * sqrt(φᵀPφ / d)
-                    epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(penultimate_features)
-                    
-                    # 如果是 full_response 模式，需要对有效token取平均得到sequence-level的值
-                    # 用于后续的filtering和weighted sampling
+                    # 如果是 full_response 模式，先取出 prompt_last 位置的特征再计算
+                    # 这个位置的 hidden state 包含了整个 prompt 的信息，
+                    # 是用来判断这个 prompt 难度/不确定性的最佳位置
                     if is_full_response:
-                        epistemic_uncertainty_2d = epistemic_uncertainty.view(batch_size, response_length)
-                        # 获取response_mask用于计算有效token的平均
-                        response_mask = data.batch.get("response_mask", None)
-                        if response_mask is not None:
-                            mask_float = response_mask.float().to(epistemic_uncertainty_2d.device)
-                            # 对有效token取平均
-                            epistemic_uncertainty = (epistemic_uncertainty_2d * mask_float).sum(dim=-1) / mask_float.sum(dim=-1).clamp_min(1)
-                        else:
-                            epistemic_uncertainty = epistemic_uncertainty_2d.mean(dim=-1)
-                        # estimated_rewards 也需要取平均用于计算 UCB/LCB
-                        if response_mask is not None:
-                            estimated_rewards_seq = (estimated_rewards * mask_float.cpu()).sum(dim=-1) / mask_float.sum(dim=-1).clamp_min(1).cpu()
-                        else:
-                            estimated_rewards_seq = estimated_rewards.mean(dim=-1)
+                        # penultimate_features 当前是 (batch_size * response_length, feature_dim)
+                        # 需要先 reshape 回 (batch_size, response_length, feature_dim)
+                        feature_dim = penultimate_features.shape[-1]
+                        penultimate_features_3d = penultimate_features.view(batch_size, response_length, feature_dim)
+                        # 取 prompt_last 位置（第一个 response token 对应的特征）
+                        prompt_last_features = penultimate_features_3d[:, 0, :]  # (batch_size, feature_dim)
+                        
+                        # 用 prompt_last 位置的特征计算 epistemic uncertainty
+                        # Requirements: 2.2 - U(x) = α_scale * sqrt(φᵀPφ / d)
+                        epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(prompt_last_features)
+                        
+                        # estimated_rewards 也取 prompt_last 位置用于计算 UCB/LCB
+                        estimated_rewards_seq = estimated_rewards[:, 0]
                     else:
+                        # 标准模式：直接用 penultimate_features 计算
+                        epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(penultimate_features)
                         estimated_rewards_seq = estimated_rewards
                     
                     # Compute UCB and LCB (sequence-level)
@@ -2529,9 +2529,6 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     output_tensors["epistemic_uncertainty"] = epistemic_uncertainty.cpu()
                     output_tensors["ucb"] = ucb
                     output_tensors["lcb"] = lcb
-                    # 同时输出 sequence-level 的 estimated_rewards 用于 filtering
-                    if is_full_response:
-                        output_tensors["estimated_rewards"] = estimated_rewards_seq.cpu()
 
             # Keep on CPU for consistency with other workers
             # The trainer will handle device placement as needed
