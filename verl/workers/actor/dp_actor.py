@@ -330,8 +330,12 @@ class DataParallelPPOActor(BasePPOActor):
 
     def _compute_hidden_states(self, full_hidden_states, response_length, attention_mask):
         """
+        Extract hidden states based on output_hidden_states_mode.
+        
         @arg:       full_hidden_states: # (batch_size, sequence_length, hidden_size)
-        @output:    hidden_states: # (batch_size, hidden_size)
+        @output:    
+            - prompt_last/prompt_mean/response_last/response_mean: (batch_size, hidden_size)
+            - full_response: (batch_size, response_length, hidden_size)
         """
         def _pool_features(full_hidden_states: torch.Tensor) -> torch.Tensor | None:
             if response_length <= 0:
@@ -360,6 +364,11 @@ class DataParallelPPOActor(BasePPOActor):
                 rmask_f = rmask.to(full_hidden_states.dtype)
                 denom = rmask_f.sum(dim=1).clamp_min(1.0).unsqueeze(-1)
                 return (full_hidden_states * rmask_f.unsqueeze(-1)).sum(dim=1) / denom
+            elif self.output_hidden_states_mode == "full_response":
+                # 返回 response 部分的完整 hidden states
+                # 切片逻辑与 log_probs 对齐: [-response_length - 1 : -1]
+                # 这样 hidden_states[i] 对应预测 response[i] 时的状态
+                return full_hidden_states[:, -response_length - 1 : -1, :]  # (batch_size, response_length, hidden_size)
             else:
                 raise NotImplementedError
 

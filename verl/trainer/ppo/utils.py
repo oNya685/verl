@@ -103,6 +103,10 @@ def need_reward_estimator(
     config: DictConfig,
 ) -> bool:
     """Given a role worker mapping, do we need reward estimator."""
+    # 显式配置优先
+    if hasattr(config, 'reward_estimator') and config.reward_estimator.get('enable', None) is not None:
+        return bool(config.reward_estimator.enable)
+    # SPO 模式默认启用
     if config.algorithm.adv_estimator == AdvantageEstimator.SPO:
         return True
     return False

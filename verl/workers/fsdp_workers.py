@@ -2062,756 +2062,6 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         output = output.to("cpu")
         return output
 
-
-# class RewardEstimatorWorker(Worker, DistProfilerExtension):
-#     """
-#     Worker for reward estimation using a linear layer.
-#     This worker maintains a simple linear model that estimates rewards from hidden states.
-#     """
-#     def __init__(self, config: FSDPCriticConfig):
-#         Worker.__init__(self)
-#         omega_profiler_config = config.get("profiler", {})
-#         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-#         if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
-#             tool_config = omega_conf_to_dataclass(
-#                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
-#             )
-#         else:
-#             tool_config = None
-#         DistProfilerExtension.__init__(
-#             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
-#         )
-#         import torch.distributed
-
-#         self.config = config
-#         print(f"[RewardEstimatorWorker] Initializing worker rank={self.rank}")
-        
-#         # --- 新增：从配置获取dtype ---
-#         torch_dtype_str = self.config.model.fsdp_config.get("model_dtype", "fp32")
-#         from verl.utils.torch_dtypes import PrecisionType
-#         self.torch_dtype = PrecisionType.to_dtype(torch_dtype_str)
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: Target dtype from config: {torch_dtype_str} -> {self.torch_dtype}")
-#         # -----------------------------
-        
-#         if not torch.distributed.is_initialized():
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: torch.distributed not initialized, init_process_group...")
-#             torch.distributed.init_process_group(
-#                 backend=get_nccl_backend(),
-#                 timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
-#                 init_method=os.environ.get("DIST_INIT_METHOD", None),
-#             )
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Distributed initialized, world_size={torch.distributed.get_world_size()}")
-#         else:
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: torch.distributed already initialized")
-            
-#         self.config: FSDPCriticConfig = config
-
-#         # build device mesh for Ulysses Sequence Parallel
-#         world_size = torch.distributed.get_world_size()
-#         from torch.distributed.device_mesh import init_device_mesh
-
-#         fsdp_size = self.config.model.fsdp_config.fsdp_size
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: Creating device mesh: world_size={world_size}, fsdp_size={fsdp_size}")
-#         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: Device mesh created: {self.device_mesh}")
-
-#         self.ulysses_device_mesh = None
-#         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
-#         dp = world_size // self.ulysses_sequence_parallel_size
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: Ulysses SP config: sp_size={self.ulysses_sequence_parallel_size}, dp={dp}")
-        
-#         if self.ulysses_sequence_parallel_size > 1:
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Initializing Ulysses device mesh...")
-#             self.ulysses_device_mesh = init_device_mesh(
-#                 device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
-#             )
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Ulysses device mesh created: {self.ulysses_device_mesh}")
-#         else:
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Ulysses SP disabled (sp_size=1)")
-            
-#         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
-
-#         # create training dispatch
-#         if self.ulysses_device_mesh is not None:
-#             is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
-#             dp_rank = self.ulysses_device_mesh["dp"].get_local_rank()
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Registering dispatch for reward_estimator: dp_rank={dp_rank}, is_collect={is_collect}")
-#             self._register_dispatch_collect_info(
-#                 "reward_estimator", dp_rank=dp_rank, is_collect=is_collect
-#             )
-#         else:
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Registering dispatch for reward_estimator: dp_rank={self.rank}, is_collect=True")
-#             self._register_dispatch_collect_info("reward_estimator", dp_rank=self.rank, is_collect=True)
-
-        
-#     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-#     def init_model(self):
-#         """在 GPU worker 上初始化模型"""
-#         print(f"[init_model] Rank {self.rank}: Starting model initialization on device {get_device_id()}")
-#         hidden_size = self.config.get("hidden_size", 896)
-#         self.lambda_reg = self.config.get("lambda_reg", 1e-3)  # Ridge regularization
-#         self.use_analytical = self.config.get("use_analytical", True)  # 是否使用解析解
-        
-#         print(f"[init_model] Rank {self.rank}: Creating Linear model: in_features={hidden_size}, out_features=1, dtype={self.torch_dtype}")
-#         # --- 修改：使用配置的dtype创建模型 ---
-#         self.model = torch.nn.Linear(hidden_size, 1, bias=False).to(get_device_id(), dtype=self.torch_dtype)
-#         print(f"[init_model] Rank {self.rank}: Model created on device {get_device_id()}, weight dtype: {self.model.weight.dtype}")
-        
-#         if self.use_analytical:
-#             # 初始化累积统计量用于解析解
-#             print(f"[init_model] Rank {self.rank}: Initializing analytical mode - accumulating XTX and XTy with dtype={self.torch_dtype}")
-#             # --- 修改：统计量也使用相同的dtype ---
-#             self.XTX = torch.zeros(hidden_size, hidden_size, device=get_device_id(), dtype=self.torch_dtype)
-#             self.XTy = torch.zeros(hidden_size, device=get_device_id(), dtype=self.torch_dtype)
-#             self.n_samples = 0
-#             print(f"[init_model] Rank {self.rank}: Model initialized on {get_device_id()}, "
-#                   f"hidden_size={hidden_size}, lambda_reg={self.lambda_reg}, mode=analytical, dtype={self.torch_dtype}")
-#         else:
-#             # 使用 SGD 方法
-#             learning_rate = self.config.get("learning_rate", 1e-4)
-#             print(f"[init_model] Rank {self.rank}: Initializing SGD mode - creating AdamW optimizer with lr={learning_rate}")
-#             self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
-#             print(f"[init_model] Rank {self.rank}: Model initialized on {get_device_id()}, "
-#                   f"hidden_size={hidden_size}, lr={learning_rate}, mode=SGD, dtype={self.torch_dtype}")
-        
-#         # 打印模型权重信息
-#         print(f"[init_model] Rank {self.rank}: Model weight shape: {self.model.weight.shape}, dtype: {self.model.weight.dtype}")
-        
-#     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward_estimator"))
-#     def compute_estimated_reward(self, data: DataProto) -> DataProto:
-#         """计算估计的奖励
-        
-#         Args:
-#             data: DataProto with batch["hidden_states"] of shape (batch_size, hidden_size)
-        
-#         Returns:
-#             DataProto with batch["estimated_rewards"] of shape (batch_size,)
-#         """
-#         data = data.to(get_device_id())
-#         print(f"[compute_estimated_reward] Rank {self.rank}: === Starting reward estimation ===")
-#         hidden_states = data.batch["representations"]  # (batch_size, hidden_size)
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Input hidden_states shape: {hidden_states.shape}")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Input hidden_states dtype: {hidden_states.dtype}")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Model weight dtype: {self.model.weight.dtype}")
-        
-#         # --- 新增：dtype一致性检查 ---
-#         if hidden_states.dtype != self.model.weight.dtype:
-#             print(f"[compute_estimated_reward] Rank {self.rank}: WARNING! dtype mismatch detected! "
-#                   f"hidden_states={hidden_states.dtype}, model.weight={self.model.weight.dtype}")
-#             print(f"[compute_estimated_reward] Rank {self.rank}: Attempting to cast hidden_states to {self.model.weight.dtype}")
-#             hidden_states = hidden_states.to(self.model.weight.dtype)
-        
-#         with torch.no_grad():
-#             self.model.eval()
-#             print(f"[compute_estimated_reward] Rank {self.rank}: Model in eval mode")
-#             estimated_rewards = self.model(hidden_states).squeeze(-1)  # (batch_size,)
-        
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Output estimated_rewards shape: {estimated_rewards.shape}")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Estimated rewards (first 5): {estimated_rewards[:5] if estimated_rewards.numel() > 0 else 'N/A'}")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Estimated rewards mean: {estimated_rewards.mean().item():.6f}, std: {estimated_rewards.std().item():.6f}")
-        
-#         output = DataProto.from_dict(tensors={"estimated_rewards": estimated_rewards})
-#         output = output.to("cpu")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: === Reward estimation completed ===")
-#         return output
-    
-#     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward_estimator"))
-#     def update_estimator(self, data: DataProto) -> DataProto:
-#         """更新估计器
-        
-#         Args:
-#             data: DataProto with:
-#                 - batch["hidden_states"]: (batch_size, hidden_size)
-#                 - batch["token_level_rewards"]: (batch_size, seq_len) or (batch_size,)
-        
-#         Returns:
-#             DataProto with metrics
-#         """
-#         data = data.to(get_device_id())
-#         print(f"[update_estimator] Rank {self.rank}: === Starting estimator update ===")
-#         hidden_states = data.batch["representations"]  # (batch_size, hidden_size)
-#         target_rewards = data.batch["token_level_rewards"]  # (batch_size, max_seq_len)
-        
-#         print(f"[update_estimator] Rank {self.rank}: hidden_states shape: {hidden_states.shape}, dtype: {hidden_states.dtype}")
-#         print(f"[update_estimator] Rank {self.rank}: target_rewards shape: {target_rewards.shape}, dtype: {target_rewards.dtype}")
-        
-#         # --- 新增：dtype一致性处理 ---
-#         if hidden_states.dtype != self.model.weight.dtype:
-#             print(f"[update_estimator] Rank {self.rank}: Casting hidden_states from {hidden_states.dtype} to {self.model.weight.dtype}")
-#             hidden_states = hidden_states.to(self.model.weight.dtype)
-        
-#         # Sum rewards across sequence if needed
-#         if len(target_rewards.shape) == 2:
-#             print(f"[update_estimator] Rank {self.rank}: Summing token-level rewards across seq_len dimension")
-#             target_rewards = target_rewards.sum(dim=-1)  # (batch_size,)
-#             print(f"[update_estimator] Rank {self.rank}: Summed target_rewards shape: {target_rewards.shape}")
-
-#         print(f"[update_estimator] Rank {self.rank}: mode={ 'analytical' if self.use_analytical else 'SGD'}")
-
-#         if self.use_analytical:
-#             # 使用解析解方法
-#             print(f"[update_estimator] Rank {self.rank}: --- Analytical update start ---")
-#             print(f"[update_estimator] Rank {self.rank}: Accumulating statistics: n_samples before={self.n_samples}")
-            
-#             # 累积统计量
-#             self.XTX += hidden_states.T @ hidden_states  # (hidden_size, hidden_size)
-#             self.XTy += hidden_states.T @ target_rewards  # (hidden_size,)
-#             self.n_samples += hidden_states.shape[0]
-            
-#             print(f"[update_estimator] Rank {self.rank}: n_samples after={self.n_samples}, batch size={hidden_states.shape[0]}")
-#             print(f"[update_estimator] Rank {self.rank}: XTX shape: {self.XTX.shape}, XTX norm: {self.XTX.norm().item():.4f}")
-#             print(f"[update_estimator] Rank {self.rank}: XTy shape: {self.XTy.shape}, XTy norm: {self.XTy.norm().item():.4f}")
-            
-#             # 求解 Ridge regression: theta = (X.T @ X + lambda*I)^{-1} @ (X.T @ y)
-#             print(f"[update_estimator] Rank {self.rank}: Solving Ridge regression with lambda_reg={self.lambda_reg}")
-#             XTX_reg = self.XTX + self.lambda_reg * torch.eye(
-#                 self.XTX.shape[0], device=get_device_id(), dtype=self.torch_dtype
-#             )
-#             theta = torch.linalg.solve(XTX_reg, self.XTy)  # (hidden_size,)
-            
-#             # 计算条件数
-#             condition_number = torch.linalg.cond(XTX_reg).item()
-#             print(f"[update_estimator] Rank {self.rank}: XTX_reg condition number: {condition_number:.4f}")
-            
-#             # 更新模型参数
-#             with torch.no_grad():
-#                 self.model.weight.copy_(theta.unsqueeze(0))
-            
-#             print(f"[update_estimator] Rank {self.rank}: Model weight updated, weight norm: {theta.norm().item():.4f}")
-            
-#             # 计算当前 batch 的 loss 用于监控
-#             with torch.no_grad():
-#                 estimated_rewards = self.model(hidden_states).squeeze(-1)
-#                 loss = torch.nn.functional.mse_loss(estimated_rewards, target_rewards)
-            
-#             metrics = {
-#                 "reward_estimator/loss": loss.item(),
-#                 "reward_estimator/n_samples": self.n_samples,
-#                 "reward_estimator/mean_estimated": estimated_rewards.mean().item(),
-#                 "reward_estimator/mean_target": target_rewards.mean().item(),
-#                 "reward_estimator/XTX_cond": torch.linalg.cond(XTX_reg).item(),  # 条件数
-#             }
-#             print(f"[update_estimator] Rank {self.rank}: Batch loss: {loss.item():.6f}")
-#             print(f"[update_estimator] Rank {self.rank}: Mean estimated: {estimated_rewards.mean().item():.6f}, Mean target: {target_rewards.mean().item():.6f}")
-#         else:
-#             # 使用 SGD 方法
-#             print(f"[update_estimator] Rank {self.rank}: --- SGD update start ---")
-#             self.model.train()
-#             estimated_rewards = self.model(hidden_states).squeeze(-1)
-#             loss = torch.nn.functional.mse_loss(estimated_rewards, target_rewards)
-            
-#             print(f"[update_estimator] Rank {self.rank}: Forward pass completed, loss: {loss.item():.6f}")
-#             print(f"[update_estimator] Rank {self.rank}: Mean estimated: {estimated_rewards.mean().item():.6f}, Mean target: {target_rewards.mean().item():.6f}")
-            
-#             self.optimizer.zero_grad()
-#             loss.backward()
-#             print(f"[update_estimator] Rank {self.rank}: Backward pass completed")
-            
-#             # 打印梯度信息
-#             grad_norm = self.model.weight.grad.norm().item()
-#             print(f"[update_estimator] Rank {self.rank}: Gradient norm: {grad_norm:.4f}")
-            
-#             self.optimizer.step()
-#             print(f"[update_estimator] Rank {self.rank}: Optimizer step completed")
-            
-#             metrics = {
-#                 "reward_estimator/loss": loss.item(),
-#                 "reward_estimator/mean_estimated": estimated_rewards.mean().item(),
-#                 "reward_estimator/mean_target": target_rewards.mean().item(),
-#             }
-        
-#         output = DataProto(meta_info={"metrics": metrics})
-#         output = output.to('cpu')
-#         print(f"[update_estimator] Rank {self.rank}: Final metrics: {metrics}")
-#         print(f"[update_estimator] Rank {self.rank}: === Estimator update completed ===")
-#         return output
-    
-#     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-#     def save_checkpoint(self, path):
-#         """保存检查点"""
-#         print(f"[save_checkpoint] Rank {self.rank}: Saving checkpoint to {path}")
-#         checkpoint = {
-#             'model_state_dict': self.model.state_dict(),
-#             'use_analytical': self.use_analytical,
-#             'torch_dtype': self.torch_dtype,  # 保存dtype信息
-#         }
-        
-#         if self.use_analytical:
-#             # 保存累积统计量
-#             print(f"[save_checkpoint] Rank {self.rank}: Saving analytical mode stats (n_samples={self.n_samples})")
-#             checkpoint['XTX'] = self.XTX
-#             checkpoint['XTy'] = self.XTy
-#             checkpoint['n_samples'] = self.n_samples
-#         else:
-#             # 保存优化器状态
-#             print(f"[save_checkpoint] Rank {self.rank}: Saving SGD mode optimizer state")
-#             checkpoint['optimizer_state_dict'] = self.optimizer.state_dict()
-        
-#         torch.save(checkpoint, path)
-#         print(f"[save_checkpoint] Rank {self.rank}: Checkpoint saved successfully")
-        
-#     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-#     def load_checkpoint(self, path):
-#         """加载检查点"""
-#         if path is None:
-#             print(f"[load_checkpoint] Rank {self.rank}: Path is None, skipping checkpoint load")
-#             return
-            
-#         print(f"[load_checkpoint] Rank {self.rank}: Loading checkpoint from {path}")
-#         checkpoint = torch.load(path, map_location=get_device_id())
-#         self.model.load_state_dict(checkpoint['model_state_dict'])
-#         print(f"[load_checkpoint] Rank {self.rank}: Model state dict loaded")
-        
-#         # --- 新增：加载时检查dtype ---
-#         if 'torch_dtype' in checkpoint:
-#             loaded_dtype = checkpoint['torch_dtype']
-#             print(f"[load_checkpoint] Rank {self.rank}: Checkpoint dtype: {loaded_dtype}")
-#             if loaded_dtype != self.torch_dtype:
-#                 print(f"[load_checkpoint] Rank {self.rank}: WARNING: Checkpoint dtype {loaded_dtype} != current config dtype {self.torch_dtype}")
-        
-#         if self.use_analytical and 'XTX' in checkpoint:
-#             # 加载累积统计量
-#             self.XTX = checkpoint['XTX'].to(get_device_id())
-#             self.XTy = checkpoint['XTy'].to(get_device_id())
-#             self.n_samples = checkpoint['n_samples']
-#             print(f"[load_checkpoint] Rank {self.rank}: Loaded analytical estimator with {self.n_samples} accumulated samples")
-#         elif not self.use_analytical and 'optimizer_state_dict' in checkpoint:
-#             # 加载优化器状态
-#             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-#             print(f"[load_checkpoint] Rank {self.rank}: Loaded SGD estimator with optimizer state")
-#         else:
-#             print(f"[load_checkpoint] Rank {self.rank}: No appropriate state found for current mode")
-#         print(f"[load_checkpoint] Rank {self.rank}: Checkpoint loading completed")
-    
-#     def reset_accumulation(self):
-#         """重置累积的统计量（仅对解析解模式有效）"""
-#         print(f"[reset_accumulation] Rank {self.rank}: Reset request received")
-#         if self.use_analytical:
-#             hidden_size = self.XTX.shape[0]
-#             self.XTX = torch.zeros(hidden_size, hidden_size, device=get_device_id(), dtype=self.torch_dtype)
-#             self.XTy = torch.zeros(hidden_size, device=get_device_id(), dtype=self.torch_dtype)
-#             self.n_samples = 0
-#             print(f"[reset_accumulation] Rank {self.rank}: Reset accumulated statistics for analytical estimator")
-#         else:
-#             print(f"[reset_accumulation] Rank {self.rank}: Warning: reset_accumulation only works for analytical mode (current mode: SGD)")
-
-# import torch.nn as nn
-# from typing import Optional
-
-# class RewardModel(nn.Module):
-#     """
-#     一个统一的奖励模型，支持多种可配置的架构。
-
-#     Args:
-#         input_size (int): 输入 hidden_states 的维度。
-#         config (dict): 包含模型配置的字典，例如:
-#             - estimator_arch (str): 'mlp_robust', 'linear_sgd', 'mlp_sigmoid_bce'
-#             - hidden_layer_size (int): MLP 的隐藏层大小。
-#             - dropout_rate (float): Dropout 比例。
-#             - dtype (torch.dtype): 模型的数据类型。
-#     """
-#     def __init__(self, input_size: int, config: dict):
-#         super().__init__()
-#         self.config = config
-#         self.input_size = input_size
-#         self.arch = "mlp_robust"
-#         self.dtype = self.config.get("dtype", torch.float32)
-        
-#         # 根据架构名称构建网络
-#         if self.arch == 'mlp_robust':
-#             self.network = self._build_mlp_robust()
-#         elif self.arch == 'linear_sgd':
-#             self.network = self._build_linear_sgd()
-#         elif self.arch == 'mlp_sigmoid_bce':
-#             self.network = self._build_mlp_sigmoid_bce()
-#         else:
-#             raise ValueError(f"Unsupported reward model architecture: {self.arch}")
-
-#         # 权重初始化
-#         self._initialize_weights()
-
-#     def _build_mlp_robust(self) -> nn.Module:
-#         """
-#         方案 A (推荐): 鲁棒的 MLP，无输出激活函数。
-#         预测一个无界的值，依赖损失函数来拟合目标范围。
-#         这是最直接且稳定的回归方法。
-#         """
-#         hidden_size = self.config.get("hidden_layer_size", self.input_size)
-#         dropout_rate = self.config.get("dropout_rate", 0.1)
-        
-#         return nn.Sequential(
-#             nn.Linear(self.input_size, hidden_size, dtype=self.dtype),
-#             nn.LayerNorm(hidden_size, dtype=self.dtype), # 新增: LayerNorm 稳定训练
-#             nn.ReLU(),
-#             nn.Dropout(dropout_rate),
-#             nn.Linear(hidden_size, 1, dtype=self.dtype)
-#         )
-
-#     def _build_linear_sgd(self) -> nn.Module:
-#         """
-#         方案 B: 简单的线性模型。
-#         替代解析解，通过 SGD/Adam 进行迭代优化，计算成本低。
-#         """
-#         return nn.Linear(self.input_size, 1, bias=False, dtype=self.dtype)
-
-#     def _build_mlp_sigmoid_bce(self) -> nn.Module:
-#         """
-#         方案 C: 带 Sigmoid 输出的 MLP。
-#         设计用于配合 BCELoss，将奖励视为一个概率。
-#         """
-#         hidden_size = self.config.get("hidden_layer_size", self.input_size)
-#         dropout_rate = self.config.get("dropout_rate", 0.1)
-        
-#         return nn.Sequential(
-#             nn.Linear(self.input_size, hidden_size, dtype=self.dtype),
-#             nn.ReLU(),
-#             nn.Dropout(dropout_rate),
-#             nn.Linear(hidden_size, 1, dtype=self.dtype),
-#             nn.Sigmoid()
-#         )
-    
-#     def _initialize_weights(self):
-#         """保守初始化：小方差，避免对初始噪声过拟合"""
-#         for module in self.modules():
-#             if isinstance(module, nn.Linear):
-#                 nn.init.normal_(module.weight, mean=0.0, std=0.01)
-#                 if module.bias is not None:
-#                     nn.init.zeros_(module.bias)
-
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         return self.network(x).squeeze(-1)
-
-# class RewardEstimatorWorker(Worker, DistProfilerExtension):
-#     """
-#     Worker for reward estimation using a neural network.
-#     This worker maintains a neural network model that estimates rewards from hidden states,
-#     with output scaled to [0,1] using Sigmoid activation.
-#     """
-#     def __init__(self, config: FSDPCriticConfig):
-#         Worker.__init__(self)
-#         omega_profiler_config = config.get("profiler", {})
-#         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-#         if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
-#             tool_config = omega_conf_to_dataclass(
-#                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
-#             )
-#         else:
-#             tool_config = None
-#         DistProfilerExtension.__init__(
-#             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
-#         )
-#         import torch.distributed
-
-#         self.config = config
-        
-#         # --- 训练策略配置 ---
-#         self.tracks_noisy_labels = True  # 明确模式
-#         self.fixed_learning_rate = self.config.get("learning_rate", 1e-3)  # 提高默认值适应噪声
-#         self.gradient_clip_norm = self.config.get("gradient_clip_norm", 1.0)  # 新增：梯度裁剪阈值
-#         self.weight_decay = self.config.get("weight_decay", 1e-4)  # 新增：权重衰减
-#         # -----------------------------
-        
-#         torch_dtype_str = self.config.model.fsdp_config.get("model_dtype", "fp32")
-#         from verl.utils.torch_dtypes import PrecisionType
-#         self.torch_dtype = PrecisionType.to_dtype(torch_dtype_str)
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: Target dtype from config: {torch_dtype_str} -> {self.torch_dtype}")
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: TRAINING MODE: Tracking NOISY labels with fixed_lr={self.fixed_learning_rate}, grad_clip={self.gradient_clip_norm}")
-#         print(f"[RewardEstimatorWorker] Initializing worker rank={self.rank}")
-#         if not torch.distributed.is_initialized():
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: torch.distributed not initialized, init_process_group...")
-#             torch.distributed.init_process_group(
-#                 backend=get_nccl_backend(),
-#                 timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
-#                 init_method=os.environ.get("DIST_INIT_METHOD", None),
-#             )
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Distributed initialized, world_size={torch.distributed.get_world_size()}")
-#         else:
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: torch.distributed already initialized")
-            
-#         self.config: FSDPCriticConfig = config
-
-#         # build device mesh for Ulysses Sequence Parallel
-#         world_size = torch.distributed.get_world_size()
-#         from torch.distributed.device_mesh import init_device_mesh
-
-#         fsdp_size = self.config.model.fsdp_config.fsdp_size
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: Creating device mesh: world_size={world_size}, fsdp_size={fsdp_size}")
-#         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: Device mesh created: {self.device_mesh}")
-
-#         self.ulysses_device_mesh = None
-#         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
-#         dp = world_size // self.ulysses_sequence_parallel_size
-#         print(f"[RewardEstimatorWorker] Rank {self.rank}: Ulysses SP config: sp_size={self.ulysses_sequence_parallel_size}, dp={dp}")
-        
-#         if self.ulysses_sequence_parallel_size > 1:
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Initializing Ulysses device mesh...")
-#             self.ulysses_device_mesh = init_device_mesh(
-#                 device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
-#             )
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Ulysses device mesh created: {self.ulysses_device_mesh}")
-#         else:
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Ulysses SP disabled (sp_size=1)")
-            
-#         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
-
-#         # create training dispatch
-#         if self.ulysses_device_mesh is not None:
-#             is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
-#             dp_rank = self.ulysses_device_mesh["dp"].get_local_rank()
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Registering dispatch for reward_estimator: dp_rank={dp_rank}, is_collect={is_collect}")
-#             self._register_dispatch_collect_info(
-#                 "reward_estimator", dp_rank=dp_rank, is_collect=is_collect
-#             )
-#         else:
-#             print(f"[RewardEstimatorWorker] Rank {self.rank}: Registering dispatch for reward_estimator: dp_rank={self.rank}, is_collect=True")
-#             self._register_dispatch_collect_info("reward_estimator", dp_rank=self.rank, is_collect=True)
-        
-#     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-#     def init_model(self):
-#         """在 GPU worker 上初始化模型"""
-#         print(f"[init_model] Rank {self.rank}: Starting model initialization on device {get_device_id()}")
-#         hidden_size = self.config.get("hidden_size", 896)
-#         self.use_analytical = self.config.get("use_analytical", False) # 默认改为 False
-
-#         if self.use_analytical:
-#             print(f"[init_model] Rank {self.rank}: ANALYTICAL mode - Linear regression")
-#             self.lambda_reg = self.config.get("lambda_reg", 1e-3)
-#             self.model = torch.nn.Linear(hidden_size, 1, bias=False).to(get_device_id(), dtype=self.torch_dtype)
-#             self.XTX = torch.zeros(hidden_size, hidden_size, device=get_device_id(), dtype=self.torch_dtype)
-#             self.XTy = torch.zeros(hidden_size, device=get_device_id(), dtype=self.torch_dtype)
-#             self.n_samples = 0
-#         else:
-#             # --- 神经网络配置 ---
-#             self.estimator_arch = "mlp_robust" # 可配置架构
-#             model_config = {
-#                 "estimator_arch": self.estimator_arch,
-#                 "hidden_layer_size": self.config.get("hidden_layer_size", hidden_size),
-#                 "dropout_rate": self.config.get("dropout_rate", 0.15),
-#                 "dtype": self.torch_dtype,
-#             }
-            
-#             print(f"[init_model] Rank {self.rank}: NEURAL NET mode")
-#             print(f"[init_model] Rank {self.rank}: Architecture: {self.estimator_arch}")
-
-#             self.model = RewardModel(input_size=hidden_size, config=model_config).to(get_device_id())
-
-#             # 根据架构选择损失函数
-#             if self.estimator_arch == 'mlp_sigmoid_bce':
-#                 self.loss_fn = nn.BCELoss()
-#                 print("[init_model] Rank {self.rank}: Using BCELoss (Binary Cross-Entropy)")
-#             else: # for 'mlp_robust' and 'linear_sgd'
-#                 self.loss_fn = nn.MSELoss() # 或者 nn.SmoothL1Loss()
-#                 print(f"[init_model] Rank {self.rank}: Using MSELoss")
-                
-#             self.optimizer = torch.optim.AdamW(
-#                 self.model.parameters(),
-#                 lr=self.fixed_learning_rate,
-#                 weight_decay=self.weight_decay,
-#             )
-            
-#             # 推荐：添加学习率调度器来稳定训练后期
-#             self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=1000, eta_min=1e-6)
-#             print(f"[init_model] Rank {self.rank}: LEARNING RATE SCHEDULER: ENABLED (CosineAnnealingLR)")
-
-#         total_params = sum(p.numel() for p in self.model.parameters())
-#         print(f"[init_model] Rank {self.rank}: Model ready: {total_params:,} params, dtype={self.torch_dtype}")
-#         print(f"[init_model] Rank {self.rank}: Architecture details:\n{self.model}")
-
-              
-#     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward_estimator"))
-#     def compute_estimated_reward(self, data: DataProto) -> DataProto:
-#         """计算估计的奖励
-        
-#         Args:
-#             data: DataProto with batch["hidden_states"] of shape (batch_size, hidden_size)
-        
-#         Returns:
-#             DataProto with batch["estimated_rewards"] of shape (batch_size,)
-#             输出值已通过 Sigmoid 缩放到 [0, 1]
-#         """
-#         data = data.to(get_device_id())
-#         print(f"[compute_estimated_reward] Rank {self.rank}: === Starting reward estimation ===")
-#         hidden_states = data.batch["hidden_states"]  # (batch_size, hidden_size)
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Input hidden_states shape: {hidden_states.shape}")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Input hidden_states dtype: {hidden_states.dtype}")
-        
-#         if hidden_states.dtype != self.torch_dtype:
-#             print(f"[compute_estimated_reward] Rank {self.rank}: Casting hidden_states from {hidden_states.dtype} to {self.torch_dtype}")
-#             hidden_states = hidden_states.to(self.torch_dtype)
-        
-#         with torch.no_grad():
-#             self.model.eval()
-#             print(f"[compute_estimated_reward] Rank {self.rank}: Model in eval mode")
-#             estimated_rewards = self.model(hidden_states)  # (batch_size,)
-        
-#         # if not self.use_analytical:
-#         #     reward_min, reward_max = estimated_rewards.min().item(), estimated_rewards.max().item()
-#         #     print(f"[compute_estimated_reward] Rank {self.rank}: Output range: [{reward_min:.4f}, {reward_max:.4f}]")
-#         #     if not (0 <= reward_min <= 1 and 0 <= reward_max <= 1):
-#         #         print(f"[WARNING] Rank {self.rank}: Output range [{reward_min:.4f}, {reward_max:.4f}] outside [0,1]!")
-        
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Output estimated_rewards shape: {estimated_rewards.shape}")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Estimated rewards (first 5): {estimated_rewards[:5] if estimated_rewards.numel() > 0 else 'N/A'}")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: Mean: {estimated_rewards.mean().item():.6f}, Std: {estimated_rewards.std().item():.6f}")
-        
-#         output = DataProto.from_dict(tensors={"estimated_rewards": estimated_rewards})
-#         output = output.to("cpu")
-#         print(f"[compute_estimated_reward] Rank {self.rank}: === Reward estimation completed ===")
-#         return output
-    
-#     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward_estimator"))
-#     def update_estimator(self, data: DataProto) -> DataProto:
-#         """更新估计器 (重构版)"""
-#         data = data.to(get_device_id())
-#         hidden_states = data.batch["hidden_states"].to(self.torch_dtype)
-#         target_rewards = data.batch["token_level_rewards"]
-        
-#         if len(target_rewards.shape) == 2:
-#             target_rewards = target_rewards.sum(dim=-1)
-        
-#         target_rewards = target_rewards.to(self.torch_dtype)
-
-#         if self.use_analytical:
-#             # --- 解析解分支 (保持不变) ---
-#             # (您的原始解析解代码放在这里)
-#             # ...
-#             # 为了简洁，此处省略，请使用您原来的代码
-#             pass # Placeholder for your analytical code
-#         else:
-#             # --- 神经网络训练分支 ---
-#             print(f"[update_estimator] Rank {self.rank}: --- Neural Net Update (Arch: {self.estimator_arch}) ---")
-#             self.model.train()
-            
-#             # 前向传播
-#             estimated_rewards = self.model(hidden_states)
-            
-#             # 计算损失
-#             # 特别注意：对于BCE，目标值必须在[0,1]之间
-#             if self.estimator_arch == 'mlp_sigmoid_bce':
-#                 # 确保 target 在 [0, 1] 范围内，否则 BCELoss 会报错
-#                 target_rewards.clamp_(0.0, 1.0)
-            
-#             loss = self.loss_fn(estimated_rewards, target_rewards)
-            
-#             # 反向传播
-#             self.optimizer.zero_grad()
-#             loss.backward()
-            
-#             # 梯度裁剪
-#             grad_norm = torch.nn.utils.clip_grad_norm_(
-#                 self.model.parameters(), max_norm=self.gradient_clip_norm
-#             )
-            
-#             self.optimizer.step()
-            
-#             # 更新学习率
-#             if self.lr_scheduler:
-#                 self.lr_scheduler.step()
-            
-#             current_lr = self.optimizer.param_groups[0]['lr']
-            
-#             metrics = {
-#                 "reward_estimator/loss": loss.item(),
-#                 "reward_estimator/mean_estimated": estimated_rewards.mean().item(),
-#                 "reward_estimator/mean_target": target_rewards.mean().item(),
-#                 "reward_estimator/grad_norm": grad_norm.item(),
-#                 "reward_estimator/learning_rate": current_lr,
-#             }
-            
-#             print(f"[update_estimator] Rank {self.rank}: Loss: {loss.item():.6f} | Grad norm: {grad_norm.item():.4f} | LR: {current_lr:.2e}")
-#             print(f"[update_estimator] Rank {self.rank}: Estimated range: [{estimated_rewards.min().item():.4f}, {estimated_rewards.max().item():.4f}]")
-#             print(f"[update_estimator] Rank {self.rank}: Target range:    [{target_rewards.min().item():.4f}, {target_rewards.max().item():.4f}]")
-
-#         output = DataProto(meta_info={"metrics": metrics})
-#         output = output.to('cpu')
-#         print(f"[update_estimator] Rank {self.rank}: === Update completed ===")
-#         return output
-    
-#     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-#     def save_checkpoint(self, path):
-#         """保存检查点"""
-#         print(f"[save_checkpoint] Rank {self.rank}: Saving checkpoint to {path}")
-#         checkpoint = {
-#             'model_state_dict': self.model.state_dict(),
-#             'use_analytical': self.use_analytical,
-#             'torch_dtype': self.torch_dtype,
-#         }
-        
-#         if self.use_analytical:
-#             # 保存累积统计量
-#             print(f"[save_checkpoint] Rank {self.rank}: Saving analytical mode stats (n_samples={self.n_samples})")
-#             checkpoint['XTX'] = self.XTX
-#             checkpoint['XTy'] = self.XTy
-#             checkpoint['n_samples'] = self.n_samples
-#         else:
-#             # 保存优化器状态
-#             print(f"[save_checkpoint] Rank {self.rank}: Saving SGD mode optimizer state")
-#             checkpoint['optimizer_state_dict'] = self.optimizer.state_dict()
-#             # 保存神经网络配置
-#             checkpoint['hidden_layer_size'] = self.hidden_layer_size
-#             checkpoint['dropout_rate'] = self.dropout_rate
-#             checkpoint['learning_rate'] = self.learning_rate
-        
-#         torch.save(checkpoint, path)
-#         print(f"[save_checkpoint] Rank {self.rank}: Checkpoint saved successfully")
-        
-#     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-#     def load_checkpoint(self, path):
-#         """加载检查点"""
-#         if path is None:
-#             print(f"[load_checkpoint] Rank {self.rank}: Path is None, skipping checkpoint load")
-#             return
-            
-#         print(f"[load_checkpoint] Rank {self.rank}: Loading checkpoint from {path}")
-#         checkpoint = torch.load(path, map_location=get_device_id())
-        
-#         # 检查模式是否匹配
-#         if checkpoint['use_analytical'] != self.use_analytical:
-#             print(f"[WARNING] Rank {self.rank}: Checkpoint mode {checkpoint['use_analytical']} != current mode {self.use_analytical}")
-#             print(f"[load_checkpoint] Rank {self.rank}: Attempting to load anyway...")
-        
-#         self.model.load_state_dict(checkpoint['model_state_dict'])
-#         print(f"[load_checkpoint] Rank {self.rank}: Model state dict loaded")
-        
-#         # 检查 dtype
-#         if 'torch_dtype' in checkpoint:
-#             loaded_dtype = checkpoint['torch_dtype']
-#             print(f"[load_checkpoint] Rank {self.rank}: Checkpoint dtype: {loaded_dtype}")
-#             if loaded_dtype != self.torch_dtype:
-#                 print(f"[WARNING] Rank {self.rank}: Checkpoint dtype {loaded_dtype} != current config dtype {self.torch_dtype}")
-        
-#         if self.use_analytical and 'XTX' in checkpoint:
-#             # 加载累积统计量
-#             self.XTX = checkpoint['XTX'].to(get_device_id())
-#             self.XTy = checkpoint['XTy'].to(get_device_id())
-#             self.n_samples = checkpoint['n_samples']
-#             print(f"[load_checkpoint] Rank {self.rank}: Loaded analytical estimator with {self.n_samples} accumulated samples")
-#         elif not self.use_analytical and 'optimizer_state_dict' in checkpoint:
-#             # 加载优化器状态
-#             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-#             print(f"[load_checkpoint] Rank {self.rank}: Loaded SGD estimator with optimizer state")
-            
-#             # 加载神经网络配置（如果存在）
-#             if 'hidden_layer_size' in checkpoint:
-#                 print(f"[load_checkpoint] Rank {self.rank}: Checkpoint hidden_layer_size: {checkpoint['hidden_layer_size']}")
-#             if 'dropout_rate' in checkpoint:
-#                 print(f"[load_checkpoint] Rank {self.rank}: Checkpoint dropout_rate: {checkpoint['dropout_rate']}")
-#         else:
-#             print(f"[load_checkpoint] Rank {self.rank}: No appropriate state found for current mode")
-#         print(f"[load_checkpoint] Rank {self.rank}: Checkpoint loading completed")
-    
-#     def reset_accumulation(self):
-#         """重置累积的统计量（仅对解析解模式有效）"""
-#         print(f"[reset_accumulation] Rank {self.rank}: Reset request received")
-#         if self.use_analytical:
-#             hidden_size = self.XTX.shape[0]
-#             self.XTX = torch.zeros(hidden_size, hidden_size, device=get_device_id(), dtype=self.torch_dtype)
-#             self.XTy = torch.zeros(hidden_size, device=get_device_id(), dtype=self.torch_dtype)
-#             self.n_samples = 0
-#             print(f"[reset_accumulation] Rank {self.rank}: Reset accumulated statistics for analytical estimator")
-#         else:
-#             print(f"[reset_accumulation] Rank {self.rank}: Warning: reset_accumulation only works for analytical mode (current mode: Neural Net SGD)")
 class RunningMeanStd:
     """
     一个辅助类，用于在线（online）计算运行中的均值和方差。
@@ -3174,8 +2424,12 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         推理阶段：计算 Baseline 和可选的 epistemic uncertainty。
         
         输入：Hidden States
+            - 标准模式: (batch_size, hidden_size)
+            - full_response模式: (batch_size, response_length, hidden_size)
         输出：
             - estimated_rewards: Sigmoid(Logits) -> (0, 1) 概率值
+              - 标准模式: (batch_size,)
+              - full_response模式: (batch_size, response_length)
             - epistemic_uncertainty: U(x) 值 (如果启用)
             - ucb: Upper Confidence Bound = v̂ + U (如果启用)
             - lcb: Lower Confidence Bound = v̂ - U (如果启用)
@@ -3193,11 +2447,23 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             self.output_layer.eval()
             
             with torch.no_grad():
+                # 检测输入维度，判断是否为 full_response 模式
+                is_full_response = hidden_states.dim() == 3
+                
+                if is_full_response:
+                    # full_response模式: (batch_size, response_length, hidden_size)
+                    batch_size, response_length, hidden_size = hidden_states.shape
+                    # 展平为 (batch_size * response_length, hidden_size) 以便通过 MLP
+                    hidden_states_flat = hidden_states.view(-1, hidden_size)
+                else:
+                    # 标准模式: (batch_size, hidden_size)
+                    hidden_states_flat = hidden_states
+                
                 # 特征归一化
                 if self.normalize_features:
-                    norm_hidden_states = (hidden_states - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
+                    norm_hidden_states = (hidden_states_flat - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
                 else:
-                    norm_hidden_states = hidden_states
+                    norm_hidden_states = hidden_states_flat
 
                 # Extract penultimate features using feature_extractor
                 # Requirements: 2.1 - Extract 128-dimensional penultimate layer features
@@ -3210,8 +2476,17 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                 # Predicted Probability of Correctness
                 estimated_rewards = torch.sigmoid(logits)
                 
+                # 如果是 full_response 模式，恢复形状
+                if is_full_response:
+                    estimated_rewards = estimated_rewards.view(batch_size, response_length)
+                
                 # Build output tensors dict
-                output_tensors = {"estimated_rewards": estimated_rewards.cpu()}
+                # full_response模式下存到'values'以兼容critic的接口
+                # 标准模式下存到'estimated_rewards'
+                if is_full_response:
+                    output_tensors = {"values": estimated_rewards.cpu()}
+                else:
+                    output_tensors = {"estimated_rewards": estimated_rewards.cpu()}
                 
                 # Compute epistemic uncertainty if enabled
                 # Requirements: 2.2, 2.3, 8.2
@@ -3220,20 +2495,43 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     # Requirements: 2.2 - U(x) = α_scale * sqrt(φᵀPφ / d)
                     epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(penultimate_features)
                     
-                    # Compute UCB and LCB
+                    # 如果是 full_response 模式，需要对有效token取平均得到sequence-level的值
+                    # 用于后续的filtering和weighted sampling
+                    if is_full_response:
+                        epistemic_uncertainty_2d = epistemic_uncertainty.view(batch_size, response_length)
+                        # 获取response_mask用于计算有效token的平均
+                        response_mask = data.batch.get("response_mask", None)
+                        if response_mask is not None:
+                            mask_float = response_mask.float().to(epistemic_uncertainty_2d.device)
+                            # 对有效token取平均
+                            epistemic_uncertainty = (epistemic_uncertainty_2d * mask_float).sum(dim=-1) / mask_float.sum(dim=-1).clamp_min(1)
+                        else:
+                            epistemic_uncertainty = epistemic_uncertainty_2d.mean(dim=-1)
+                        # estimated_rewards 也需要取平均用于计算 UCB/LCB
+                        if response_mask is not None:
+                            estimated_rewards_seq = (estimated_rewards * mask_float.cpu()).sum(dim=-1) / mask_float.sum(dim=-1).clamp_min(1).cpu()
+                        else:
+                            estimated_rewards_seq = estimated_rewards.mean(dim=-1)
+                    else:
+                        estimated_rewards_seq = estimated_rewards
+                    
+                    # Compute UCB and LCB (sequence-level)
                     # Requirements: 4.1 - LCB = v̂ - U, UCB = v̂ + U
-                    ucb = estimated_rewards + epistemic_uncertainty
-                    lcb = estimated_rewards - epistemic_uncertainty
+                    ucb = estimated_rewards_seq + epistemic_uncertainty.cpu()
+                    lcb = estimated_rewards_seq - epistemic_uncertainty.cpu()
                     
                     # Clamp UCB/LCB to valid probability range [0, 1]
                     ucb = torch.clamp(ucb, 0.0, 1.0)
                     lcb = torch.clamp(lcb, 0.0, 1.0)
                     
-                    # Add to output
+                    # Add to output (all are sequence-level: (batch_size,))
                     # Requirements: 6.5, 8.2 - Return epistemic uncertainty in output DataProto
                     output_tensors["epistemic_uncertainty"] = epistemic_uncertainty.cpu()
-                    output_tensors["ucb"] = ucb.cpu()
-                    output_tensors["lcb"] = lcb.cpu()
+                    output_tensors["ucb"] = ucb
+                    output_tensors["lcb"] = lcb
+                    # 同时输出 sequence-level 的 estimated_rewards 用于 filtering
+                    if is_full_response:
+                        output_tensors["estimated_rewards"] = estimated_rewards_seq.cpu()
 
             # Keep on CPU for consistency with other workers
             # The trainer will handle device placement as needed
@@ -3247,7 +2545,14 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
         """
         训练阶段：使用 BCE Loss 更新 MLP，并更新 epistemic uncertainty tracker。
         
-        Requirements: 1.2, 1.3, 6.1, 6.2, 6.3, 6.4
+        输入：
+            - hidden_states: 
+              - 标准模式: (batch_size, hidden_size)
+              - full_response模式: (batch_size, response_length, hidden_size)
+            - token_level_rewards: (batch_size,) 或 (batch_size, response_length)
+        
+        注意：full_response模式下，会将hidden_states展平处理，
+              但target仍使用sequence-level的reward（对response_length维度求和）。
         """
         try:
             self._load_to_gpu()
@@ -3259,13 +2564,35 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             if target_rewards.dim() == 2: target_rewards = target_rewards.sum(dim=-1)
             
             final_target = target_rewards.float()
+            
+            # 检测输入维度，判断是否为 full_response 模式
+            is_full_response = hidden_states.dim() == 3
+            
+            # 获取 response_mask
+            response_mask = data.batch["response_mask"]
+            
+            if is_full_response:
+                # full_response模式: (batch_size, response_length, hidden_size)
+                batch_size, response_length, hidden_size = hidden_states.shape
+                # 展平为 (batch_size * response_length, hidden_size) 以便通过 MLP
+                hidden_states_flat = hidden_states.view(-1, hidden_size)
+                # 将 target 扩展到每个 token (用于训练时的 loss 计算)
+                # 每个 token 的 target 都是该 sequence 的最终 reward
+                final_target_expanded = final_target.unsqueeze(1).expand(-1, response_length).reshape(-1)
+                # 展平 response_mask
+                response_mask_flat = response_mask.view(-1).float()
+            else:
+                # 标准模式: (batch_size, hidden_size)
+                hidden_states_flat = hidden_states
+                final_target_expanded = final_target
+                response_mask_flat = None
 
             # --- 特征归一化更新 ---
             if self.normalize_features: 
-                self.feature_rms.update(hidden_states)
-                norm_hidden_states = (hidden_states - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
+                self.feature_rms.update(hidden_states_flat)
+                norm_hidden_states = (hidden_states_flat - self.feature_rms.mean) / torch.sqrt(self.feature_rms.var + 1e-8)
             else: 
-                norm_hidden_states = hidden_states
+                norm_hidden_states = hidden_states_flat
             
             # --- 训练更新 (MLP + BCE) ---
             self.model.train()
@@ -3277,8 +2604,15 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             logits = self.output_layer(penultimate_features).squeeze(-1)
             
             # 计算 BCE With Logits Loss
-            loss_fn = torch.nn.BCEWithLogitsLoss()
-            loss = loss_fn(logits, final_target)
+            # full_response 模式下使用 response_mask 只在有效 token 上计算 loss
+            if is_full_response:
+                loss_fn = torch.nn.BCEWithLogitsLoss(reduction='none')
+                loss_per_token = loss_fn(logits, final_target_expanded)
+                # 只在有效 token 上计算平均 loss
+                loss = (loss_per_token * response_mask_flat).sum() / response_mask_flat.sum().clamp_min(1)
+            else:
+                loss_fn = torch.nn.BCEWithLogitsLoss()
+                loss = loss_fn(logits, final_target_expanded)
             
             # 反向传播
             self.optimizer.zero_grad()
@@ -3295,16 +2629,29 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
             
             with torch.no_grad():
                 pred_probs = torch.sigmoid(logits)
-                metrics["reward_estimator/mean_predicted_prob"] = pred_probs.mean().item()
-                metrics["reward_estimator/std_predicted_prob"] = pred_probs.std().item()
-                metrics["reward_estimator/min_predicted_prob"] = pred_probs.min().item()
-                metrics["reward_estimator/max_predicted_prob"] = pred_probs.max().item()
-                metrics["reward_estimator/mean_target"] = target_rewards.float().mean().item()
+                
+                # 如果是 full_response 模式，对 response_length 维度取平均来计算 sequence-level 指标
+                if is_full_response:
+                    pred_probs_2d = pred_probs.view(batch_size, response_length)
+                    if response_mask is not None:
+                        # 使用 mask 计算加权平均
+                        mask_2d = response_mask.float()
+                        pred_probs_seq = (pred_probs_2d * mask_2d).sum(dim=-1) / mask_2d.sum(dim=-1).clamp_min(1)
+                    else:
+                        pred_probs_seq = pred_probs_2d.mean(dim=-1)
+                else:
+                    pred_probs_seq = pred_probs
+                
+                metrics["reward_estimator/mean_predicted_prob"] = pred_probs_seq.mean().item()
+                metrics["reward_estimator/std_predicted_prob"] = pred_probs_seq.std().item()
+                metrics["reward_estimator/min_predicted_prob"] = pred_probs_seq.min().item()
+                metrics["reward_estimator/max_predicted_prob"] = pred_probs_seq.max().item()
+                metrics["reward_estimator/mean_target"] = final_target.float().mean().item()
                 
                 # 计算预测准确度（如果target是0/1）
-                if torch.all((target_rewards == 0) | (target_rewards == 1)):
-                    pred_binary = (pred_probs > 0.5).float()
-                    accuracy = (pred_binary == target_rewards.float()).float().mean()
+                if torch.all((final_target == 0) | (final_target == 1)):
+                    pred_binary = (pred_probs_seq > 0.5).float()
+                    accuracy = (pred_binary == final_target.float()).float().mean()
                     metrics["reward_estimator/accuracy"] = accuracy.item()
 
                 indices = data.non_tensor_batch["uid"]
@@ -3329,7 +2676,7 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     group_means[i] = id2mean[indices[i]]
                 
                 # 3. 计算预测值与 Group Mean 的 MSE Loss
-                mse_vs_group = torch.nn.functional.mse_loss(pred_probs, group_means)
+                mse_vs_group = torch.nn.functional.mse_loss(pred_probs_seq, group_means)
                 
                 metrics["reward_estimator/mse_vs_group_mean"] = mse_vs_group.item()
                 metrics["reward_estimator/mean_group_reward"] = group_means.mean().item()

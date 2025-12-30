@@ -1,9 +1,9 @@
 set -x
-project_name='linearpo_mlp_ppo_sample_filter_epistemic_norm_adv'
+project_name='linearpo_mlp_token_ppo_sample_filter_epistemic_norm_adv'
 experiment_name='b1024_mb128_4b'
-model_path=huggingface.co/Qwen/Qwen3-4B-Base
+model_path=$HOME/autodl-tmp/Qwen/Qwen3-4B-Base
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
-test_files='[data/aime25/test_16.parquet,data/aime24/test_16.parquet,data/amc23/test_16.parquet,data/math500/test.parquet,data/minerva/test.parquet,data/olympiad/test.parquet]'
+test_files='[data/aime25/test_16.parquet,data/amc23/test_16.parquet,data/math500/test.parquet]'
 
 ENABLE_WEIGHTED_SAMPLING=true
 WEIGHT_UPDATE_INTERVAL=30
@@ -70,7 +70,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=$project_name \
     trainer.experiment_name=$experiment_name \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=151 \
     trainer.test_freq=20 \
