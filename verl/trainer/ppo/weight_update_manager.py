@@ -19,6 +19,7 @@ from typing import Dict, Any, Optional
 from torch.utils.data import DataLoader
 
 from verl import DataProto
+from verl.protocol import DataProtoConfig
 from verl.single_controller.base.worker import Worker
 from verl.trainer.ppo.ray_trainer import Role
 
@@ -334,6 +335,7 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                         tensor_dict[key] = value
                 
                 # 构建DataProto - 使用from_dict方法，只传递tensor数据
+                # 启用auto_padding以支持batch_size不能被world_size整除的情况
                 data_proto = DataProto.from_dict(
                     tensors=tensor_dict,
                     meta_info={
@@ -342,6 +344,7 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                         "use_dynamic_bsz": False,
                         "calculate_entropy": False,  # 不需要计算entropy
                         "enable_hidden_states": True,  # 需要hidden states
+                        DataProtoConfig.auto_padding_key: True,  # 启用auto_padding
                     }
                 )
                 
@@ -371,8 +374,12 @@ class SyncWeightUpdateManager(WeightUpdateManager):
                         continue
                 
                 # 构建reward estimator的输入
+                # 启用auto_padding以支持batch_size不能被world_size整除的情况
                 estimator_data = DataProto.from_dict(
-                    tensors={"hidden_states": hidden_states}
+                    tensors={"hidden_states": hidden_states},
+                    meta_info={
+                        DataProtoConfig.auto_padding_key: True,  # 启用auto_padding
+                    }
                 )
                 
                 # 使用reward estimator计算v值
