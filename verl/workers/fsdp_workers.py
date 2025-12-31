@@ -2517,8 +2517,8 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     
                     # Compute UCB and LCB (sequence-level)
                     # Requirements: 4.1 - LCB = v̂ - U, UCB = v̂ + U
-                    ucb = estimated_rewards_seq + epistemic_uncertainty.cpu()
-                    lcb = estimated_rewards_seq - epistemic_uncertainty.cpu()
+                    ucb = estimated_rewards_seq + epistemic_uncertainty
+                    lcb = estimated_rewards_seq - epistemic_uncertainty
                     
                     # Clamp UCB/LCB to valid probability range [0, 1]
                     ucb = torch.clamp(ucb, 0.0, 1.0)
@@ -2527,8 +2527,11 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     # Add to output (all are sequence-level: (batch_size,))
                     # Requirements: 6.5, 8.2 - Return epistemic uncertainty in output DataProto
                     output_tensors["epistemic_uncertainty"] = epistemic_uncertainty.cpu()
-                    output_tensors["ucb"] = ucb
-                    output_tensors["lcb"] = lcb
+                    output_tensors["ucb"] = ucb.cpu()
+                    output_tensors["lcb"] = lcb.cpu()
+                    # 同时输出 sequence-level 的 estimated_rewards 用于 filtering
+                    if is_full_response:
+                        output_tensors["estimated_rewards"] = estimated_rewards_seq.cpu()
 
             # Keep on CPU for consistency with other workers
             # The trainer will handle device placement as needed
