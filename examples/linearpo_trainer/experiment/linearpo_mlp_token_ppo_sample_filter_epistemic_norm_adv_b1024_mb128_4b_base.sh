@@ -26,6 +26,8 @@ if [ -f "$script_path" ]; then
     echo "Script copied to outputs/$project_name/$experiment_name/$(basename $script_path)"
 fi
 
+export VERL_AUTO_PADDING=True
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
     reward_estimator.enable=True \
