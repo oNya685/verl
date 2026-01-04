@@ -1384,18 +1384,10 @@ class RayPPOTrainer:
                             # Create filtered batch for actor update
                             actor_batch = batch[keep_indices]
                             
-                            # Ensure batch size is divisible by world_size for multi-GPU training
-                            world_size = getattr(self.actor_rollout_wg, 'world_size', 1)
-                            if world_size > 1:
-                                batch_size = len(actor_batch)
-                                if batch_size % world_size != 0:
-                                    # Pad to nearest multiple of world_size
-                                    padding_size = world_size - (batch_size % world_size)
-                                    # Repeat last samples to pad
-                                    padding_indices = keep_indices[-padding_size:]
-                                    padded_indices = keep_indices + padding_indices
-                                    actor_batch = batch[padded_indices]
-                                    print(f"Padded actor batch from {batch_size} to {len(padded_indices)} samples for {world_size} GPUs")
+                            # Enable auto_padding for the filtered batch so that dispatch_dp_compute_data_proto
+                            # can handle non-divisible batch sizes correctly
+                            from verl.protocol import DataProtoConfig
+                            actor_batch.meta_info[DataProtoConfig.auto_padding_key] = True
                             
                             print(f"Filtered {len(estimated_rewards) - len(keep_indices)} samples "
                                   f"({filter_metrics['filter/filter_rate']:.2%}) for actor update")
