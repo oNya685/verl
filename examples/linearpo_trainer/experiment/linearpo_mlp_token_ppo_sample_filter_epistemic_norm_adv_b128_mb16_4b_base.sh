@@ -1,6 +1,6 @@
 set -x
 project_name='linearpo_mlp_token_ppo_sample_filter_epistemic_norm_adv'
-experiment_name='b128_mb16_4b_1231'
+experiment_name='b128_mb16_4b_0104'
 model_path=huggingface.co/Qwen/Qwen3-4B-Base
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
 test_files='[data/aime25/test_16.parquet,data/aime24/test_16.parquet,data/amc23/test_16.parquet,data/math500/test.parquet,data/minerva/test.parquet,data/olympiad/test.parquet]'
