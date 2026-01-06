@@ -877,10 +877,19 @@ class DataProto:
         Returns:
             List[DataProto]: a list of DataProto after splitting
         """
+        original_size = len(self)
+        padding_applied = False
+        
         if not self.is_padding_enabled():
             assert len(self) % chunks == 0, (
                 f"only support equal chunk. Got size of DataProto {len(self)} and chunk {chunks}."
             )
+        else:
+            # When padding is enabled, pad both batch and non_tensor_batch to be divisible by chunks
+            if original_size % chunks != 0:
+                padding_size = chunks - (original_size % chunks)
+                self.padding(padding_size, padding_candidate="first")
+                padding_applied = True
 
         bsz_in_batch = None
         if self.batch is not None:

@@ -1,5 +1,5 @@
 set -x
-project_name='linearpo_mlp_token_ppo_sample_filter_epistemic_norm_adv'
+project_name='linearpo_mlp_token_ppo_sample_epistemic_norm_adv'
 experiment_name='b1024_mb128_4b_0106'
 model_path=huggingface.co/Qwen/Qwen3-4B-Base
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
@@ -14,7 +14,7 @@ ENABLE_EPISTEMIC=true
 LAMBDA_REG=1.0
 ALPHA_SCALE=0.5
 
-ENABLE_FILTER=true
+ENABLE_FILTER=false
 USE_DYNAMIC_FILTERING=true
 FILTER_MIN=0.1
 FILTER_MAX=0.9
