@@ -2497,21 +2497,20 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     # 这个位置的 hidden state 包含了整个 prompt 的信息，
                     # 是用来判断这个 prompt 难度/不确定性的最佳位置
                     if is_full_response:
-                        # penultimate_features 当前是 (batch_size * response_length, feature_dim)
-                        # 需要先 reshape 回 (batch_size, response_length, feature_dim)
+                        # 1. Uncertainty: 只取 Prompt Last Token
                         feature_dim = penultimate_features.shape[-1]
                         penultimate_features_3d = penultimate_features.view(batch_size, response_length, feature_dim)
-                        # 取 prompt_last 位置（第一个 response token 对应的特征）
-                        prompt_last_features = penultimate_features_3d[:, 0, :]  # (batch_size, feature_dim)
-                        
-                        # 用 prompt_last 位置的特征计算 epistemic uncertainty
-                        # Requirements: 2.2 - U(x) = α_scale * sqrt(φᵀPφ / d)
+                        prompt_last_features = penultimate_features_3d[:, 0, :] 
                         epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(prompt_last_features)
                         
-                        # estimated_rewards 也取 prompt_last 位置用于计算 UCB/LCB
-                        estimated_rewards_seq = estimated_rewards[:, 0]
+                        # 2. Value: 改为使用整个 Response 的均值 (Mean Value)
+                        mask = data.batch["response_mask"].to(estimated_rewards.device)
+                        mask = mask.float()
+                        sum_rewards = (estimated_rewards * mask).sum(dim=1)
+                        sum_mask = mask.sum(dim=1).clamp_min(1.0)
+                        estimated_rewards_seq = sum_rewards / sum_mask
+                            
                     else:
-                        # 标准模式：直接用 penultimate_features 计算
                         epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(penultimate_features)
                         estimated_rewards_seq = estimated_rewards
                     
@@ -2687,7 +2686,19 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     # Extract penultimate features again (detached for covariance update)
                     # Note: penultimate_features from training may have gradients, so we re-extract
                     with torch.no_grad():
-                        detached_features = self._extract_penultimate_features(norm_hidden_states)
+                        # For epistemic uncertainty, we only use prompt_last token features
+                        # This is because epistemic uncertainty should be computed at sequence level,
+                        # not token level. The prompt_last token contains the full prompt information.
+                        if is_full_response:
+                            # In full_response mode, norm_hidden_states is (bsz * response_length, hidden_size)
+                            # We need to extract only the first token of each sequence (prompt_last)
+                            # Reshape back to (bsz, response_length, hidden_size) and take [:, 0, :]
+                            norm_hidden_states_3d = norm_hidden_states.view(batch_size, response_length, -1)
+                            prompt_last_features = norm_hidden_states_3d[:, 0, :]  # (bsz, hidden_size)
+                            detached_features = self._extract_penultimate_features(prompt_last_features)
+                        else:
+                            # Standard mode: norm_hidden_states is already (bsz, hidden_size)
+                            detached_features = self._extract_penultimate_features(norm_hidden_states)
                     
                     # Update the inverse covariance matrix using Sherman-Morrison
                     # Requirements: 1.2 - Update using Sherman-Morrison formula
@@ -2697,9 +2708,10 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     # Requirements: 6.1, 6.2, 6.3, 6.4
                     epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(detached_features)
                     
-                    # Compute UCB and LCB
-                    ucb = pred_probs + epistemic_uncertainty
-                    lcb = pred_probs - epistemic_uncertainty
+                    # Compute UCB and LCB using sequence-level predictions
+                    # In full_response mode, use pred_probs_seq (sequence-level) instead of pred_probs (token-level)
+                    ucb = pred_probs_seq + epistemic_uncertainty
+                    lcb = pred_probs_seq - epistemic_uncertainty
                     
                     # Clamp to valid range
                     ucb = torch.clamp(ucb, 0.0, 1.0)
@@ -2723,7 +2735,11 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                     # Log number of covariance updates
                     metrics["reward_estimator/epistemic/n_updates"] = self.epistemic_tracker.n_updates
 
-            self.n_samples += norm_hidden_states.shape[0]
+            # Update n_samples with the actual number of sequences, not tokens
+            if is_full_response:
+                self.n_samples += batch_size
+            else:
+                self.n_samples += norm_hidden_states.shape[0]
             metrics["reward_estimator/n_samples"] = self.n_samples
             
             return DataProto(meta_info={"metrics": metrics}).to('cpu')
