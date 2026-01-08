@@ -41,7 +41,7 @@ python3 -m verl.trainer.main_ppo \
     data.weight_update_interval=$WEIGHT_UPDATE_INTERVAL \
     data.weight_update_batch_size=$WEIGHT_UPDATE_BATCH_SIZE \
     data.beta_exploration=$BETA_EXPLORATION \
-    algorithm.use_kl_in_reward=True \
+    algorithm.use_kl_in_reward=False \
     algorithm.filter_groups.enable=$ENABLE_FILTER \
     algorithm.filter_groups.metric=estimated_reward \
     algorithm.filter_groups.estimated_reward_min=$FILTER_MIN \
