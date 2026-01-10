@@ -2504,7 +2504,12 @@ class RewardEstimatorWorker(Worker, DistProfilerExtension):
                         epistemic_uncertainty = self.epistemic_tracker.compute_uncertainty(prompt_last_features)
                         
                         # 2. Value: 改为使用整个 Response 的均值 (Mean Value)
-                        mask = data.batch["response_mask"].to(estimated_rewards.device)
+                        # 如果 response_mask 不存在（例如从 weight_update_manager 调用），使用全 1 mask
+                        if "response_mask" in data.batch.keys():
+                            mask = data.batch["response_mask"].to(estimated_rewards.device)
+                        else:
+                            # 默认全 1 mask，表示所有 token 都有效
+                            mask = torch.ones_like(estimated_rewards)
                         mask = mask.float()
                         sum_rewards = (estimated_rewards * mask).sum(dim=1)
                         sum_mask = mask.sum(dim=1).clamp_min(1.0)
