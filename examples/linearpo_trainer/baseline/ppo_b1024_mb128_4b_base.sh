@@ -36,6 +36,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=1 \
+    critic.enable=True \
     critic.optim.lr=1e-5 \
     critic.model.path=$model_path \
     critic.ppo_micro_batch_size_per_gpu=8 \
