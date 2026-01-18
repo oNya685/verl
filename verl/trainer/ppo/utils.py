@@ -87,6 +87,8 @@ def need_reward_model(
 
 def need_critic(config: DictConfig) -> bool:
     """Given a config, do we need critic."""
+    if config.critic.enable == True:
+        return bool(config.critic.enable)
     if config.reward_estimator.enable is not None:
         return False
     if config.critic.enable is not None:
