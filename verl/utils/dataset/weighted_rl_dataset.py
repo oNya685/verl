@@ -40,7 +40,7 @@ class WeightedRLHFDataset(RLHFDataset):
         processor: Optional[ProcessorMixin] = None,
         max_samples: int = -1,
         eps: float = 0.001,
-        initial_v: float = 0.5,
+        initial_v: float = 1,
         min_weight: float = 0.01,
     ):
         super().__init__(data_files, tokenizer, config, processor, max_samples)
@@ -58,7 +58,7 @@ class WeightedRLHFDataset(RLHFDataset):
         
         # 初始化权重向量
         dataset_size = len(self.dataframe)
-        initial_weight = np.sqrt(self.initial_v * (1 - self.initial_v)) + self.eps
+        initial_weight = self.initial_v
         self.weights = np.full(dataset_size, initial_weight, dtype=np.float32)
         
         # 存储v值，用于权重计算

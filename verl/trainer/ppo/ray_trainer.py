@@ -1331,13 +1331,11 @@ class RayPPOTrainer:
                         max_thresh = self.config.algorithm.filter_groups.estimated_reward_max
                         
                         # Check if epistemic uncertainty is available for dynamic filtering
-                        # Requirements: 4.1, 4.2, 4.3, 4.4, 4.5 - Dynamic confidence-based filtering
                         epistemic_uncertainty = batch.batch.get("epistemic_uncertainty", None)
                         use_dynamic_filtering = self.config.reward_estimator.get("epistemic_uncertainty", {}).get("use_dynamic_filtering", False)
                         
                         if use_dynamic_filtering and epistemic_uncertainty is not None:
                             # Dynamic filtering using UCB/LCB confidence intervals
-                            # Requirements: 4.1 - Compute UCB = v̂ + U and LCB = v̂ - U
                             ucb = estimated_rewards + epistemic_uncertainty
                             lcb = estimated_rewards - epistemic_uncertainty
                             
@@ -1345,7 +1343,6 @@ class RayPPOTrainer:
                             ucb = torch.clamp(ucb, 0.0, 1.0)
                             lcb = torch.clamp(lcb, 0.0, 1.0)
                             
-                            # Requirements: 4.2, 4.3, 4.4 - Keep if confidence interval overlaps with learning zone
                             # Overlap condition: UCB > min_thresh AND LCB < max_thresh
                             # This gives "benefit of the doubt" to uncertain predictions
                             keep_mask = (ucb > min_thresh) & (lcb < max_thresh)
