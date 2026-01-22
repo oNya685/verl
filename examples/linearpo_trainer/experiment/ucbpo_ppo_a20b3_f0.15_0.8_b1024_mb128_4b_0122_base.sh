@@ -1,6 +1,6 @@
 set -x
-project_name='linearpo_mlp_token_ppo_sample_filter_epistemic_norm_adv'
-experiment_name='a50_f0.2_0.6_b1024_mb512_4b_0119'
+project_name='ucbpo_ppo'
+experiment_name='a20b3_f0.15_0.8_b1024_mb128_4b_0122'
 model_path=huggingface.co/Qwen/Qwen3-4B-Base
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
 test_files='[data/aime25/test_16.parquet,data/aime24/test_16.parquet,data/amc23/test_16.parquet,data/math500/test.parquet,data/minerva/test.parquet,data/olympiad/test.parquet]'
@@ -9,15 +9,15 @@ ENABLE_WEIGHTED_SAMPLING=true
 WEIGHT_UPDATE_INTERVAL=30
 WEIGHT_UPDATE_BATCH_SIZE=1024
 
-BETA_EXPLORATION=1.0
+BETA_EXPLORATION=3.0
 ENABLE_EPISTEMIC=true
 LAMBDA_REG=1.0
-ALPHA_SCALE=50
+ALPHA_SCALE=20
 
 ENABLE_FILTER=true
 USE_DYNAMIC_FILTERING=true
-FILTER_MIN=0.2
-FILTER_MAX=0.6
+FILTER_MIN=0.15
+FILTER_MAX=0.8
 
 mkdir -p "outputs/$project_name/$experiment_name"
 script_path="${BASH_SOURCE[0]}"
@@ -59,7 +59,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=512 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \

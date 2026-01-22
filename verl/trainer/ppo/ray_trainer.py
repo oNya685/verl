@@ -1347,6 +1347,10 @@ class RayPPOTrainer:
                             # This gives "benefit of the doubt" to uncertain predictions
                             keep_mask = (ucb > min_thresh) & (lcb < max_thresh)
                             
+                            # Additional condition: keep samples where |reward - estimated_reward| > 0.5
+                            abs_reward_diff = torch.abs(batch.batch["token_level_rewards"].sum(dim=-1) - estimated_rewards)
+                            keep_mask = keep_mask | (abs_reward_diff > 0.5)
+                            
                             # Log dynamic filtering statistics
                             filter_metrics = {
                                 "filter/total_samples": len(estimated_rewards),
