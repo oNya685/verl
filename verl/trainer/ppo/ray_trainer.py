@@ -495,7 +495,6 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
             chat_prompt = [
                 {"role": "system", "content": difficulty_prompt},
                 {"role": "user", "content": combined_content},
-                {"role": "assistant", "content": "I think the difficulty of this problem is"}
             ]
 
             # Apply chat template to get the full prompt string
