@@ -470,22 +470,32 @@ Evaluate the problem on a scale of 1 to 5:
 
 You will be given both the problem and its answer. Use both pieces of information to determine the difficulty.
 
-CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any other text.
+Example response: I think the difficulty of this problem is 3.
+
+CRITICAL: Your response should start with "I think the difficulty of this problem is" followed by a single number (1, 2, 3, 4, or 5). Do not output any other text.
 """
 
         # Create prompt for each problem and answer
         generated_prompts = []
         for i, (prompt, answer) in enumerate(zip(prompts, answers)):
-            # Combine prompt and answer (if answer is available)
-            if answer and answer.strip():
-                combined_content = f"Problem: {prompt}\nAnswer: {answer}"
-            else:
-                combined_content = prompt
+            # Process prompt to remove repeated user/assistant tags
+            processed_prompt = prompt.strip()
+            processed_prompt = processed_prompt.replace("user\n", "").replace("\nassistant", "")
 
-            # Create a chat-style prompt
+            # Process answer
+            processed_answer = answer.strip()
+
+            # Combine prompt and answer (if answer is available)
+            if processed_answer:
+                combined_content = f"Problem: {processed_prompt}\nAnswer: {processed_answer}"
+            else:
+                combined_content = processed_prompt
+
+            # Create a chat-style prompt with assistant guidance
             chat_prompt = [
                 {"role": "system", "content": difficulty_prompt},
-                {"role": "user", "content": combined_content}
+                {"role": "user", "content": combined_content},
+                {"role": "assistant", "content": "I think the difficulty of this problem is"}
             ]
 
             # Apply chat template to get the full prompt string
@@ -546,7 +556,12 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
             import re
             difficulty_scores = []
             for i, response in enumerate(responses):
-                match = re.search(r"\b([1-5])\b", response)
+                # Updated pattern to extract difficulty score from new format
+                match = re.search(r"I think the difficulty of this problem is\s*([1-5])", response)
+                if not match:
+                    # Fallback to original pattern if new format not found
+                    match = re.search(r"\b([1-5])\b", response)
+
                 if match:
                     difficulty_score = int(match.group(1))
                     if i == 0:  # Only print score for first sample
