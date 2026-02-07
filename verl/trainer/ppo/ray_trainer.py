@@ -534,10 +534,11 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
                 for ids in response_data.batch["responses"].numpy()
             ]
 
-            # Debug print responses
-            for i, (prompt, response) in enumerate(zip(generated_prompts, responses)):
-                print(f"\n=== Difficulty Estimation Output {i} ===")
-                print(f"Response: {response}")
+            # Debug print only the first sample in each batch
+            if responses:
+                print(f"\n=== Difficulty Estimation Sample 0 ===")
+                print(f"Input: {generated_prompts[0]}")
+                print(f"Output: {responses[0]}")
 
             # Parse difficulty scores
             import re
@@ -546,10 +547,11 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
                 match = re.search(r"\b([1-5])\b", response)
                 if match:
                     difficulty_score = int(match.group(1))
-                    print(f"\n=== Difficulty Score {i} ===")
-                    print(f"Parsed score: {difficulty_score}")
+                    if i == 0:  # Only print score for first sample
+                        print(f"Score: {difficulty_score}")
                 else:
-                    print(f"\nWarning: Could not parse difficulty score from response: {response}")
+                    if i == 0:  # Only print warning for first sample
+                        print(f"Warning: Could not parse difficulty score from response: {response}")
                     difficulty_score = 3
                 difficulty_scores.append(difficulty_score)
 
@@ -558,10 +560,9 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
                 0.9 - 0.2 * (score - 1) for score in difficulty_scores
             ]
 
-            # Debug print final scores
-            print("\n=== Final Difficulty Scores ===")
-            for i, (score, normalized) in enumerate(zip(difficulty_scores, normalized_scores)):
-                print(f"Sample {i}: Score = {score}, Normalized = {normalized:.2f}")
+            # Debug print only the first sample's normalized score
+            if normalized_scores:
+                print(f"Normalized Score: {normalized_scores[0]:.2f}")
 
             return normalized_scores
 
