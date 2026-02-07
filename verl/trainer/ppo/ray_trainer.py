@@ -475,7 +475,7 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
 
         # Create prompt for each problem and answer
         generated_prompts = []
-        for prompt, answer in zip(prompts, answers):
+        for i, (prompt, answer) in enumerate(zip(prompts, answers)):
             # Combine prompt and answer (if answer is available)
             if answer and answer.strip():
                 combined_content = f"Problem: {prompt}\nAnswer: {answer}"
