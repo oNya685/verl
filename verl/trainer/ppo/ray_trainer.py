@@ -472,8 +472,8 @@ You will be given both the problem and its answer. Use both pieces of informatio
 CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any other text.
 """
 
-        # Create chat completion requests for each prompt and answer
-        chat_requests = []
+        # Create prompt for each problem and answer
+        generated_prompts = []
         for prompt, answer in zip(prompts, answers):
             # Combine prompt and answer (if answer is available)
             if answer and answer.strip():
@@ -481,60 +481,88 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
             else:
                 combined_content = prompt
 
-            chat_requests.append({
-                "model": "default-model",
-                "messages": [
-                    {"role": "system", "content": difficulty_prompt},
-                    {"role": "user", "content": combined_content}
-                ],
-                "temperature": 0.1,  # Lower temperature for consistent results
-                "max_tokens": 10,    # We only need a single number
-                "seed": 42,          # Fixed seed for reproducibility
-            })
+            # Create a chat-style prompt
+            chat_prompt = [
+                {"role": "system", "content": difficulty_prompt},
+                {"role": "user", "content": combined_content}
+            ]
 
-        # Send chat completion requests in parallel
-        import asyncio
-        import re
+            # Apply chat template to get the full prompt string
+            full_prompt = self.tokenizer.apply_chat_template(
+                chat_prompt,
+                add_generation_prompt=True,
+                tokenize=False
+            )
+            generated_prompts.append(full_prompt)
 
-        # Function to process a single request
-        async def process_request(chat_request):
-            try:
-                response = await self.actor_rollout_wg.chat_completion.remote(chat_request)
+        # Tokenize the prompts
+        tokenized_prompts = self.tokenizer(
+            generated_prompts,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            max_length=2048
+        )
 
-                # Parse the response
-                if hasattr(response, "choices") and response.choices:
-                    content = response.choices[0].message.content.strip()
-                else:
-                    content = str(response)
+        # Create a DataProto for the prompts
+        prompt_data = DataProto()
+        prompt_data.batch["input_ids"] = tokenized_prompts["input_ids"]
+        prompt_data.batch["attention_mask"] = tokenized_prompts["attention_mask"]
 
-                # Extract difficulty score from response
-                match = re.search(r"\b([1-5])\b", content)
+        # Compute position ids (assuming left-padded)
+        prompt_data.batch["position_ids"] = self._compute_position_ids(tokenized_prompts["attention_mask"])
+
+        # Add raw prompt ids to non_tensor_batch
+        prompt_data.non_tensor_batch["raw_prompt_ids"] = [
+            list(input_ids) for input_ids in tokenized_prompts["input_ids"].numpy()
+        ]
+
+        # Generate responses using the actor model
+        try:
+            response_data = self.actor_rollout_wg.generate_sequences(prompt_data)
+
+            # Decode the responses
+            responses = [
+                self.tokenizer.decode(ids, skip_special_tokens=True)
+                for ids in response_data.batch["responses"].numpy()
+            ]
+
+            # Parse difficulty scores
+            import re
+            difficulty_scores = []
+            for response in responses:
+                match = re.search(r"\b([1-5])\b", response)
                 if match:
                     difficulty_score = int(match.group(1))
                 else:
-                    # Default to medium difficulty if parsing fails
-                    # print warning
-                    print(f"Warning: Could not parse difficulty score from response: {content}")
+                    print(f"Warning: Could not parse difficulty score from response: {response}")
                     difficulty_score = 3
+                difficulty_scores.append(difficulty_score)
 
-                # Normalize to 0-1 range, inverse mapping: 1→0.9, 2→0.7, 3→0.5, 4→0.3, 5→0.1
-                normalized_score = 0.9 - 0.2 * (difficulty_score - 1)
-                return normalized_score
+            # Normalize scores
+            normalized_scores = [
+                0.9 - 0.2 * (score - 1) for score in difficulty_scores
+            ]
 
-            except Exception as e:
-                print(f"Error estimating difficulty: {e}")
-                return 0.5  # Default to medium difficulty
+            return normalized_scores
 
-        # Run all requests in parallel
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            tasks = [process_request(req) for req in chat_requests]
-            results = loop.run_until_complete(asyncio.gather(*tasks))
-        finally:
-            loop.close()
+        except Exception as e:
+            print(f"Error estimating difficulty: {e}")
+            return [0.5 for _ in prompts]  # Default to medium difficulty
 
-        return results
+    def _compute_position_ids(self, attention_mask):
+        """Compute position ids from attention mask (assuming left-padded)."""
+        position_ids = []
+        for mask in attention_mask:
+            valid_positions = mask.sum().item()
+            pos_ids = torch.arange(valid_positions, dtype=torch.long)
+            # Pad with zeros for the masked positions
+            pos_ids = torch.cat([
+                torch.zeros(len(mask) - valid_positions, dtype=torch.long),
+                pos_ids
+            ])
+            position_ids.append(pos_ids)
+        return torch.stack(position_ids)
 
     def compute_estimated_rewards(self, batch: DataProto) -> DataProto:
         """
@@ -1440,12 +1468,13 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
-                    # update reward estimator (always use full batch)
-                    if self.use_reward_estimator:
-                        with marked_timer("update_estimator", timing_raw, color="purple"):
-                            estimator_output = self.reward_estimator_wg.update_estimator(batch)
-                        estimator_output_metrics = reduce_metrics(estimator_output.meta_info["metrics"])
-                        metrics.update(estimator_output_metrics)
+                    # Skip updating reward estimator when using LLM-based difficulty estimation
+                    # We are using self.compute_estimated_rewards instead of reward_estimator_wg
+                    # if self.use_reward_estimator:
+                    #     with marked_timer("update_estimator", timing_raw, color="purple"):
+                    #         estimator_output = self.reward_estimator_wg.update_estimator(batch)
+                    #     estimator_output_metrics = reduce_metrics(estimator_output.meta_info["metrics"])
+                    #     metrics.update(estimator_output_metrics)
 
                     # Filter batch for actor update based on estimated reward
                     actor_batch = batch
