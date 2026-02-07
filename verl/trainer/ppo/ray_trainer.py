@@ -36,6 +36,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
 from verl import DataProto
+from tensordict import TensorDict
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
@@ -506,8 +507,10 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
 
         # Create a DataProto for the prompts
         prompt_data = DataProto()
-        prompt_data.batch["input_ids"] = tokenized_prompts["input_ids"]
-        prompt_data.batch["attention_mask"] = tokenized_prompts["attention_mask"]
+        prompt_data.batch = TensorDict({
+            "input_ids": tokenized_prompts["input_ids"],
+            "attention_mask": tokenized_prompts["attention_mask"]
+        }, batch_size=len(prompts))
 
         # Compute position ids (assuming left-padded)
         prompt_data.batch["position_ids"] = self._compute_position_ids(tokenized_prompts["attention_mask"])
