@@ -1,6 +1,6 @@
 set -x
-project_name='ucbpo_ppo'
-experiment_name='a200b1_f0.1_0.7_b1024_mb128_4b_0129'
+project_name='SJPO'
+experiment_name='4b_0207'
 model_path=huggingface.co/Qwen/Qwen3-4B
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
 test_files='[data/aime25/test_16.parquet,data/aime24/test_16.parquet,data/amc23/test_16.parquet,data/math500/test.parquet,data/minerva/test.parquet,data/olympiad/test.parquet]'
