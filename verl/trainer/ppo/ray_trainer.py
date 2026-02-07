@@ -520,10 +520,11 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
         # Compute position ids (assuming left-padded)
         prompt_data.batch["position_ids"] = self._compute_position_ids(tokenized_prompts["attention_mask"])
 
-        # Add raw prompt ids to non_tensor_batch
-        prompt_data.non_tensor_batch["raw_prompt_ids"] = [
-            list(input_ids) for input_ids in tokenized_prompts["input_ids"].numpy()
-        ]
+        # Add raw prompt ids to non_tensor_batch (must be numpy array for chunking)
+        prompt_data.non_tensor_batch["raw_prompt_ids"] = np.array(
+            [list(input_ids) for input_ids in tokenized_prompts["input_ids"].numpy()],
+            dtype=object
+        )
 
         # Generate responses using the actor model
         try:
