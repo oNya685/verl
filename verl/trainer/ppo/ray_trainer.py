@@ -526,9 +526,13 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
                 return 0.5  # Default to medium difficulty
 
         # Run all requests in parallel
-        loop = asyncio.get_event_loop()
-        tasks = [process_request(req) for req in chat_requests]
-        results = loop.run_until_complete(asyncio.gather(*tasks))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            tasks = [process_request(req) for req in chat_requests]
+            results = loop.run_until_complete(asyncio.gather(*tasks))
+        finally:
+            loop.close()
 
         return results
 
