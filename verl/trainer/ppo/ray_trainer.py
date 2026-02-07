@@ -446,6 +446,131 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
+    # Math difficulty estimation using LLM token output
+    def estimate_difficulty(self, prompts: list[str], answers: list[str]) -> list[float]:
+        """
+        Estimate difficulty of math problems using the training actor model.
+
+        Args:
+            prompts: List of math problem prompts
+            answers: List of corresponding answers
+
+        Returns:
+            List of normalized difficulty scores (0-1 range)
+        """
+        # Difficulty estimation prompt
+        difficulty_prompt = """You are an expert mathematics difficulty estimator. Your job is to assess the difficulty of a given math problem for a general large language model.
+Evaluate the problem on a scale of 1 to 5:
+1: Very Easy (Trivial arithmetic or logic)
+2: Easy (Basic algebra/geometry)
+3: Medium (Standard high school curriculum)
+4: Hard (Competition level, AIME/AMC)
+5: Very Hard (Olympiad level, complex proof)
+
+You will be given both the problem and its answer. Use both pieces of information to determine the difficulty.
+
+CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any other text.
+"""
+
+        # Create chat completion requests for each prompt and answer
+        chat_requests = []
+        for prompt, answer in zip(prompts, answers):
+            # Combine prompt and answer (if answer is available)
+            if answer and answer.strip():
+                combined_content = f"Problem: {prompt}\nAnswer: {answer}"
+            else:
+                combined_content = prompt
+
+            chat_requests.append({
+                "model": "default-model",
+                "messages": [
+                    {"role": "system", "content": difficulty_prompt},
+                    {"role": "user", "content": combined_content}
+                ],
+                "temperature": 0.1,  # Lower temperature for consistent results
+                "max_tokens": 10,    # We only need a single number
+                "seed": 42,          # Fixed seed for reproducibility
+            })
+
+        # Send chat completion requests in parallel
+        import asyncio
+        import re
+
+        # Function to process a single request
+        async def process_request(chat_request):
+            try:
+                response = await self.actor_rollout_wg.chat_completion.remote(chat_request)
+
+                # Parse the response
+                if hasattr(response, "choices") and response.choices:
+                    content = response.choices[0].message.content.strip()
+                else:
+                    content = str(response)
+
+                # Extract difficulty score from response
+                match = re.search(r"\b([1-5])\b", content)
+                if match:
+                    difficulty_score = int(match.group(1))
+                else:
+                    # Default to medium difficulty if parsing fails
+                    # print warning
+                    print(f"Warning: Could not parse difficulty score from response: {content}")
+                    difficulty_score = 3
+
+                # Normalize to 0-1 range, inverse mapping: 1→0.9, 2→0.7, 3→0.5, 4→0.3, 5→0.1
+                normalized_score = 0.9 - 0.2 * (difficulty_score - 1)
+                return normalized_score
+
+            except Exception as e:
+                print(f"Error estimating difficulty: {e}")
+                return 0.5  # Default to medium difficulty
+
+        # Run all requests in parallel
+        loop = asyncio.get_event_loop()
+        tasks = [process_request(req) for req in chat_requests]
+        results = loop.run_until_complete(asyncio.gather(*tasks))
+
+        return results
+
+    def compute_estimated_rewards(self, batch: DataProto) -> DataProto:
+        """
+        Compute estimated rewards using difficulty estimation for a batch of data.
+
+        Args:
+            batch: DataProto containing batch data
+
+        Returns:
+            DataProto containing estimated rewards (shape: [batch_size], dtype: float32)
+        """
+        # Get full prompts from batch
+        if "full_prompts" in batch.non_tensor_batch:
+            prompts = batch.non_tensor_batch["full_prompts"].tolist()
+        else:
+            # Fallback to decoding from input_ids if full_prompts is not available
+            prompts = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+
+        # Get answers from batch (from reward_model.ground_truth)
+        answers = []
+        if "reward_model" in batch.non_tensor_batch:
+            reward_model_data = batch.non_tensor_batch["reward_model"]
+            for rm in reward_model_data:
+                if isinstance(rm, dict) and "ground_truth" in rm:
+                    answers.append(str(rm["ground_truth"]))
+                else:
+                    answers.append("")
+        else:
+            # If no reward model data available, use empty answers
+            # print warning
+            print("Warning: No reward model data available. Using empty answers for difficulty estimation.")
+            answers = [""] * len(prompts)
+
+        # Estimate difficulty for all prompts
+        difficulty_scores = self.estimate_difficulty(prompts, answers)
+
+        # Convert to tensor and wrap in DataProto
+        estimated_rewards = torch.tensor(difficulty_scores, dtype=torch.float32)
+        return DataProto.from_dict(tensors={"estimated_rewards": estimated_rewards.cpu()})
+
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
@@ -1248,10 +1373,9 @@ class RayPPOTrainer:
 
                     if self.use_reward_estimator:
                         with marked_timer("estimated_reward", timing_raw, color="pupple"):
-                            # representations = self.actor_rollout_wg.compute_representations(batch)
-                            # batch = batch.union(representations)
-                            estimated_reward = self.reward_estimator_wg.compute_estimated_reward(batch)
-                            batch = batch.union(estimated_reward)
+                            # Use LLM to estimate difficulty as the reward estimator
+                            estimated_reward_data = self.compute_estimated_rewards(batch)
+                            batch = batch.union(estimated_reward_data)
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
