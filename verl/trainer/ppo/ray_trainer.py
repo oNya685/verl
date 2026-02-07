@@ -496,9 +496,10 @@ CRITICAL: Output ONLY a single number (1, 2, 3, 4, or 5). Do not output any othe
             )
             generated_prompts.append(full_prompt)
 
-            # Debug print
-            print(f"\n=== Difficulty Estimation Input {i} ===")
-            print(f"Full prompt: {full_prompt}")
+            # Debug print only first input in each batch
+            if i == 0:
+                print(f"\n=== Difficulty Estimation Input 0 ===")
+                print(f"Full prompt: {full_prompt}")
 
         # Tokenize the prompts
         tokenized_prompts = self.tokenizer(
