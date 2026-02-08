@@ -501,7 +501,8 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
             full_prompt = self.tokenizer.apply_chat_template(
                 chat_prompt,
                 add_generation_prompt=True,
-                tokenize=False
+                tokenize=False,
+                enable_thinking=False,
             )
             generated_prompts.append(full_prompt)
 

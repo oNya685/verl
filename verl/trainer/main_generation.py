@@ -109,6 +109,7 @@ def main_task(config):
             return_tensors="pt",
             return_dict=True,
             tokenize=True,
+            enable_thinking=False,
             **apply_chat_template_kwargs,
         )
         input_ids = inputs["input_ids"]
