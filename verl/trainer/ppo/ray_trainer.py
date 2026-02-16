@@ -1486,12 +1486,6 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
 
-                        if self.use_reward_estimator:
-                            with marked_timer("estimated_reward", timing_raw, color="pupple"):
-                                # Use LLM to estimate difficulty as the reward estimator
-                                estimated_reward_data = self.compute_estimated_rewards(batch)
-                                batch = batch.union(estimated_reward_data)
-
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
@@ -1503,6 +1497,12 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                        if self.use_reward_estimator:
+                            with marked_timer("estimated_reward", timing_raw, color="pupple"):
+                                # Use LLM to estimate difficulty as the reward estimator
+                                estimated_reward_data = self.compute_estimated_rewards(batch)
+                                batch = batch.union(estimated_reward_data)
 
                         # Compute rollout importance sampling weights centrally (once per batch)
                         # This corrects for mismatch between rollout policy and training policy
