@@ -638,15 +638,7 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
         # Compute current batch's reward mean
         # We use token_level_rewards if available (from apply_kl_penalty)
         # Otherwise, use token_level_scores (from reward model)
-        if "token_level_rewards" in batch.batch:
-            rewards = batch.batch["token_level_rewards"]
-        elif "token_level_scores" in batch.batch:
-            rewards = batch.batch["token_level_scores"]
-        else:
-            # If no reward information available, use default mean
-            print("Warning: No reward information available. Using default baseline.")
-            default_reward = torch.tensor([0.5 for _ in range(len(prompts))], dtype=torch.float32)
-            return DataProto.from_dict(tensors={"estimated_rewards": default_reward.cpu()})
+        rewards = batch.batch["token_level_rewards"]
 
         # Compute mean reward for the batch
         reward_mean = rewards.mean().item()
