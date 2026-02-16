@@ -638,7 +638,7 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
         # Compute current batch's reward mean
         # We use token_level_rewards if available (from apply_kl_penalty)
         # Otherwise, use token_level_scores (from reward model)
-        rewards = batch.batch["token_level_rewards"]
+        rewards = batch.batch["token_level_rewards"].sum(dim=-1)
 
         # Compute mean reward for the batch
         reward_mean = rewards.mean().item()

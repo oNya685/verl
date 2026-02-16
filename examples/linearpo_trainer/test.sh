@@ -1,6 +1,6 @@
 set -x
 project_name='ucbpo_ppo'
-experiment_name='test0207'
+experiment_name='test0216'
 model_path=$HOME/autodl-tmp/Qwen/Qwen3-4B
 train_files='[data/dapo/train.parquet,data/math/train.parquet]'
 test_files='[data/aime25/test_16.parquet]'
@@ -40,7 +40,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.output_hidden_states_mode='full_response' \
     data.train_files=$train_files \
     data.val_files=$test_files \
-    data.train_batch_size=64 \
+    data.train_batch_size=128 \
     data.max_prompt_length=2048 \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
@@ -58,6 +58,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=1 \
+    trainer.val_before_train=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=$project_name \
