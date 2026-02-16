@@ -1487,18 +1487,18 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
-                    if self.use_reward_estimator:
-                        with marked_timer("estimated_reward", timing_raw, color="pupple"):
-                            # Use LLM to estimate difficulty as the reward estimator
-                            estimated_reward_data = self.compute_estimated_rewards(batch)
-                            batch = batch.union(estimated_reward_data)
-
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
+
+                        if self.use_reward_estimator:
+                            with marked_timer("estimated_reward", timing_raw, color="pupple"):
+                                # Use LLM to estimate difficulty as the reward estimator
+                                estimated_reward_data = self.compute_estimated_rewards(batch)
+                                batch = batch.union(estimated_reward_data)
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
