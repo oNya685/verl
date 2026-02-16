@@ -574,7 +574,7 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
 
             # Normalize scores
             normalized_scores = [
-                0.9 - 0.2 * (score - 1) for score in difficulty_scores
+                1 - 0.25 * (score - 1) for score in difficulty_scores
             ]
 
             # Debug print only the first sample's normalized score
