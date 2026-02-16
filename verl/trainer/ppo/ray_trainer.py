@@ -603,7 +603,7 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
 
     def compute_estimated_rewards(self, batch: DataProto) -> DataProto:
         """
-        Compute estimated rewards using difficulty estimation for a batch of data.
+        Compute dynamic estimated rewards using reward mean and difficulty-based offsets.
 
         Args:
             batch: DataProto containing batch data
@@ -629,15 +629,62 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
                     answers.append("")
         else:
             # If no reward model data available, use empty answers
-            # print warning
             print("Warning: No reward model data available. Using empty answers for difficulty estimation.")
             answers = [""] * len(prompts)
 
-        # Estimate difficulty for all prompts
+        # Estimate difficulty for all prompts (0-1 range)
         difficulty_scores = self.estimate_difficulty(prompts, answers)
 
+        # Compute current batch's reward mean
+        # We use token_level_rewards if available (from apply_kl_penalty)
+        # Otherwise, use token_level_scores (from reward model)
+        if "token_level_rewards" in batch.batch:
+            rewards = batch.batch["token_level_rewards"]
+        elif "token_level_scores" in batch.batch:
+            rewards = batch.batch["token_level_scores"]
+        else:
+            # If no reward information available, use default mean
+            print("Warning: No reward information available. Using default baseline.")
+            default_reward = torch.tensor([0.5 for _ in range(len(prompts))], dtype=torch.float32)
+            return DataProto.from_dict(tensors={"estimated_rewards": default_reward.cpu()})
+
+        # Compute mean reward for the batch
+        reward_mean = rewards.mean().item()
+
+        # Convert normalized difficulty scores (0-1) back to 1-5 scale
+        difficulty_levels = [int(round(s * 4 + 1)) for s in difficulty_scores]  # 0-1 → 1-5
+
+        # Compute difficulty-based estimated rewards
+        # Difficulty 1: 1/5 mean
+        # Difficulty 2: 3/5 mean
+        # Difficulty 3: mean
+        # Difficulty 4: mean + 2/5 (1-mean)
+        # Difficulty 5: mean + 4/5 (1-mean)
+        estimated_rewards = []
+        for level in difficulty_levels:
+            if level == 1:
+                er = reward_mean * 1 / 5
+            elif level == 2:
+                er = reward_mean * 3 / 5
+            elif level == 3:
+                er = reward_mean
+            elif level == 4:
+                er = reward_mean + (2 / 5) * (1 - reward_mean)
+            elif level == 5:
+                er = reward_mean + (4 / 5) * (1 - reward_mean)
+            else:
+                # Fallback for invalid levels
+                er = reward_mean
+
+            # Clamp to [0, 1] range
+            estimated_rewards.append(max(0.0, min(1.0, er)))
+
+        # Debug print only first sample
+        if estimated_rewards:
+            print(f"Batch Reward Mean: {reward_mean:.3f}, First Sample Difficulty Level: {difficulty_levels[0]}, Offset: {offsets[0]:.3f}, Final Baseline: {estimated_rewards[0]:.3f}")
+
         # Convert to tensor and wrap in DataProto
-        estimated_rewards = torch.tensor(difficulty_scores, dtype=torch.float32)
+        estimated_rewards = torch.tensor(estimated_rewards, dtype=torch.float32)
         return DataProto.from_dict(tensors={"estimated_rewards": estimated_rewards.cpu()})
 
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
