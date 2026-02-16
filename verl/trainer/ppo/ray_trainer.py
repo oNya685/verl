@@ -681,7 +681,7 @@ CRITICAL: Your response should start with "I think the difficulty of this proble
 
         # Debug print only first sample
         if estimated_rewards:
-            print(f"Batch Reward Mean: {reward_mean:.3f}, First Sample Difficulty Level: {difficulty_levels[0]}, Offset: {offsets[0]:.3f}, Final Baseline: {estimated_rewards[0]:.3f}")
+            print(f"Batch Reward Mean: {reward_mean:.3f}, First Sample Difficulty Level: {difficulty_levels[0]}, Final Baseline: {estimated_rewards[0]:.3f}")
 
         # Convert to tensor and wrap in DataProto
         estimated_rewards = torch.tensor(estimated_rewards, dtype=torch.float32)
